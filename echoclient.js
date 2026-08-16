@@ -887,4 +887,4 @@ console.log('%c[MESSIAH v5] BEYOND MESSIAH â€” Fully automatic', 'color:#f5
 console.log('[v5] Zero toggles. Every tick optimized. Press M to toggle HUD.');
 console.log('[v5] Conquest phases: BLITZâ†’FASTâ†’MEDIUMâ†’SLOWâ†’V.SLOWâ†’DEFENSE');
 console.log('[v5] PIAI attacks, reinforcement mode, density-perfect expansion');
-console.log('[v5] Type EchoAPI.debug() to verify hooks');
+console.log('[v5] Type EchoAPI.debug() to verify hooks'); 
