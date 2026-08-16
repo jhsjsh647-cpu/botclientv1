@@ -958,33 +958,30 @@ function startAutoOpen(ticks) {
   const NEUTRAL_ID = window.gameManager?.arraySize || 512;
 
   switch (ticks) {
-     // Cycle 1: 144L, 799T
+    // Cycle 1: 144L, 799T
     case 60: attackTarget(percentToValue(20.800), 512); break;
     case 81: attackTarget(percentToValue(17.871), 512); break;
 
-    // Cycle 2: 544L , 1045T
-    case 151: attackTarget(percentToValue(16.7), 512); break;
-    case 165: attackTarget(percentToValue(18.55), 512); break;
-    case 172: attackTarget(percentToValue(39.84), 512); break;
-    case 186: attackTarget(percentToValue(24.12), 512); break;
+    // Cycle 2: 364L , 1322T
+    case 165: attackTarget(percentToValue(0.1), 512); break;
+    case 172: attackTarget(percentToValue(37.59765), 512); break;
 
-    // Cycle 3: 1104L , 1656T
-    case 256: attackTarget(percentToValue(0.1), 512); break;
-    case 263: attackTarget(percentToValue(22.3633), 512); break;
-    case 270: attackTarget(percentToValue(52.54), 512); break;
-    case 284: attackTarget(percentToValue(29.98), 512); break;
+    // Cycle 3: 1012L , 1807T
+    case 249: attackTarget(percentToValue(16.406), 512); break;
+    case 263: attackTarget(percentToValue(16.308593), 512); break;
+    case 270: attackTarget(percentToValue(32.1289), 512); break;
+    case 284: attackTarget(percentToValue(34.17968), 512); break;
 
-    // Cycle 4:2244L , 2484T
+    // Cycle 4:2112L , 2696T
     case 354: attackTarget(percentToValue(0.01), 512); break;
-    case 361: attackTarget(percentToValue(47.07), 512); break;
-    case 375: attackTarget(percentToValue(35.84), 512); break;
-    case 382: attackTarget(percentToValue(87.4), 512); break;
+    case 361: attackTarget(percentToValue(41.50390), 512); break;
+    case 375: attackTarget(percentToValue(28.7109), 512); break;
+    case 382: attackTarget(percentToValue(62.8906), 512); break;
 
-    // Cycle 5:3784L , 4378T
-    case 452: attackTarget(percentToValue(28.61), 512); break;
-    case 466: attackTarget(percentToValue(23.73), 512); break;
-    case 473: attackTarget(percentToValue(31.64), 512); break;
-    case 480: attackTarget(percentToValue(71), 512); break;
+    // Cycle 5:3612L , 4645T
+    case 452: attackTarget(percentToValue(41.40625), 512); break;
+    case 473: attackTarget(percentToValue(26.0742), 512); break;
+    case 490: attackTarget(percentToValue(54.1992), 512); break;
   }
 }
 
