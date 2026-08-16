@@ -329,7 +329,7 @@ const Borders = {
 /* ================================================================
  *  ATTACK PROTOCOL â€” raw game commands
  * ================================================================ */
-const p2v = (p) => Math.max(0, Math.min(1023, Math.floor(1024 * p + 0.5) - 1));
+const p2v = (p) => Math.max(0, Math.min(1023, Math.round(1023 * p / 100)));
 
 function sendAttack(percent, targetId) {
   try { return window.protocolHandler?.gameCommandSender.attackTargetHandler(p2v(percent), targetId); } catch { return false; }
@@ -455,7 +455,7 @@ const Bot = {
   },
 
   /** Retreat from dangerous targets */
-  def prioritizeRetreat() {
+  prioritizeRetreat() {
     if (!this.underAttack) return;
     const myDensity = API.density(API.myId);
     if (myDensity >= M.PERFECT_DENSITY) return;
@@ -516,7 +516,7 @@ const Opening = {
     for (const move of this.moves) {
       if (move.tick === Cycle.tick && !this.executed.has(move.tick)) {
         this.executed.add(move.tick);
-        sendAttack(p2v(move.pct), move.target);
+        sendAttack(move.pct, move.target);
       }
     }
 
@@ -710,7 +710,7 @@ const Boats = {
             (1 - e.density / Math.max(1, myDensity)) * 10
           )));
           if (Bot.canAfford(pct) && API.troops(API.myId) * pct / 100 >= 60) {
-            sendBoat(p2v(pct), e.id);
+            sendBoat(pct, e.id);
             this.lastTick = Cycle.tick;
             Bot.stats.boats++;
             return;
@@ -887,4 +887,4 @@ console.log('%c[MESSIAH v5] BEYOND MESSIAH â€” Fully automatic', 'color:#f5
 console.log('[v5] Zero toggles. Every tick optimized. Press M to toggle HUD.');
 console.log('[v5] Conquest phases: BLITZâ†’FASTâ†’MEDIUMâ†’SLOWâ†’V.SLOWâ†’DEFENSE');
 console.log('[v5] PIAI attacks, reinforcement mode, density-perfect expansion');
-console.log('[v5] Type EchoAPI.debug() to verify hooks'); 
+console.log('[v5] Type EchoAPI.debug() to verify hooks');
