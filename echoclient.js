@@ -72,7 +72,7 @@
    * ================================================================ */
   var cfg = {
     /* Opening */
-    autoOpen: false,
+    autoOpen: true,
     /* Engines */
     expansionEnabled: true,
     combatEnabled: true,
@@ -130,7 +130,7 @@
 
   /* Old ECHO percentToValue â€” matches original opening tuning exactly */
   function percentToValue(p) {
-    return Math.max(0, Math.min(1023, Math.floor(1024 * (p / 100) + 0.5) - 1));
+    return Math.max(1, Math.min(1023, Math.floor(1024 * (p / 100) + 0.5) - 1));
   }
 
   function getPhase(tick) {
@@ -590,10 +590,13 @@
       updateCycle();
       if (state.tick <= 0 || state.ownId < 0) return;
 
-      /* Old Opening */
-      if (cfg.autoOpen && state.tick !== lastOpenTick && !state.openingDone) {
+      /* Old Opening â€” process all ticks to avoid skipping */
+      if (cfg.autoOpen && !state.openingDone && state.tick >= 60) {
+        var start = lastOpenTick < 60 ? 59 : lastOpenTick;
+        for (var ot = start + 1; ot <= state.tick; ot++) {
+          startAutoOpen(ot);
+        }
         lastOpenTick = state.tick;
-        startAutoOpen(state.tick);
       }
 
       /* MESSIAH Engines */
@@ -777,6 +780,11 @@
               <span class="eg-label">Auto Opening</span>
               <label class="eg-toggle-wrap"><input type="checkbox" id="opt-auto-open"><span class="eg-toggle-track"></span></label>
             </div>
+            <div class="eg-section">Display</div>
+            <div class="eg-row">
+              <span class="eg-label">Fullscreen</span>
+              <label class="eg-toggle-wrap"><input type="checkbox" id="opt-fullscreen"><span class="eg-toggle-track"></span></label>
+            </div>
             <div class="eg-section">Status</div>
             <div id="opening-status-info"></div>
           </div>
@@ -951,6 +959,33 @@
 
       /* Opening toggle */
       bindToggle('opt-auto-open', function (v) { cfg.autoOpen = v; });
+
+      /* Fullscreen toggle */
+      var fsToggle = document.getElementById('opt-fullscreen');
+      if (fsToggle) {
+        fsToggle.addEventListener('change', function () {
+          try {
+            if (fsToggle.checked) {
+              var el = document.documentElement;
+              var rfs = el.requestFullscreen || el.webkitRequestFullscreen || el.msRequestFullscreen;
+              if (rfs) rfs.call(el);
+            } else {
+              var efs = document.exitFullscreen || document.webkitExitFullscreen || document.msExitFullscreen;
+              if (efs) efs.call(document);
+            }
+          } catch (e) {}
+        });
+        document.addEventListener('fullscreenchange', function () {
+          try {
+            fsToggle.checked = !!document.fullscreenElement;
+          } catch (e) {}
+        });
+        document.addEventListener('webkitfullscreenchange', function () {
+          try {
+            fsToggle.checked = !!document.webkitFullscreenElement;
+          } catch (e) {}
+        });
+      }
 
       /* Micro toggles */
       bindToggle('opt-formula', function (v) {
