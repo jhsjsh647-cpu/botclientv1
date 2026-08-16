@@ -1132,4 +1132,4 @@
 
   console.log('%c[MESSIAH v5] Loaded. Waiting for game...', 'color:#a855f7;font-weight:bold');
 
-})();
+})(); 
