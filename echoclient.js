@@ -989,14 +989,14 @@ function startAutoOpen(ticks) {
 /* ================================================================
  *  MAIN CLIENT LOOP
  * ================================================================ */
-let lastTick = -1;
+let lastTick = -10;
 
 function clientLoop() {
   const ticks = getTicks();
   const gameStarted = getGameStarted();
 
   if (!gameStarted) {
-    lastTick = -1;
+    lastTick = -10;
     requestAnimationFrame(clientLoop);
     return;
   }
