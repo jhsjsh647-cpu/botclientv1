@@ -1,684 +1,1025 @@
 /* ================================================================
- *  ZYROX MESSIAH v5 â€” BEYOND MESSIAH (Fixed)
+ *  ECHO Client v2 â€” Mobile Edition
  *  ----------------------------------------------------------------
- *  Fully automatic. Zero toggles. Every tick optimized.
- *  Hooks verified against decompiled script.js (31957 lines).
- *
- *  REAL API (from script.js):
- *    gameManager.OwnPlayerId   â€” your player ID
- *    gameManager.kD            â€” total map land count (NOT gS!)
- *    gameManager.arraySize     â€” 512 (max players)
- *    gameManager.yB            â€” bot/neutral offset
- *    gameManager.gS            â€” 2 (conquest cost per tile)
- *    gameManager.isGameStarted() â€” a17===1 && !isSpawnPhase
- *    playerData.playerTroops[i]  â€” Uint32Array
- *    playerData.landOwned[i]    â€” Uint32Array
- *    playerData.gp[i]           â€” border tile arrays
- *    playerData.ga[i]           â€” special border tiles
- *    mapData.neighborOffsets    â€” Int32Array(4) in tile-data units
- *    protocolHandler.gameCommandSender.attackTargetHandler(ratio, target)
- *    protocolHandler.gameCommandSender.cancelAttackHandler(target)
- *    protocolHandler.gameCommandSender.sendBoatHandler(ratio, target)
- *    gameLoop.getTick()          â€” current tick
- *    gameLoop.targetFrameTime    â€” 56ms
- *    incomeManager.getPlayerIncomeRate(player) â€” 0-700
- *    incomeManager.getRedInterestCap(player)    â€” min(100*land, 1B)
- *
- *  NOTE: All game vars are top-level `var` â†’ accessible via window.
- *  Game error handler (line 97) catches ALL errors and shows popup
- *  when startupState===1. Every call must be wrapped in try/catch.
+ *  Designed to work with the deobfuscated script.js (v2.16.x)
+ *  All hooks use the readable variable names: gameManager, playerData,
+ *  mapData, protocolHandler, gameLoop, etc.
+ *  Mobile: touch drag, floating toggle button, larger tap targets
  * ================================================================ */
 
-(function () {
-  'use strict';
+/* â”€â”€ API Verification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+const EchoAPI = {
+  ready: false,
+  lastCheck: 0,
 
-  /* ---- constants ---- */
-  var TICK_MS = 56;
-  var INCOME_EVERY = 10;          // tick%10===9
-  var AUG_END = 1920;             // augmentation ends
-  var MAX_RATE = 700;
-  var SOFT_CAP = 100;             // troops/land soft cap
-  var HARD_CAP = 150;
-  var ATTACK_TAX = 12 / 1024;
-  var MIN_RATIO = 0;              // unitRatio 0-1023
-  var MAX_RATIO = 1023;
+  check() {
+    this.ready = !!(
+      window.gameManager &&
+      window.playerData &&
+      window.mapData &&
+      window.protocolHandler &&
+      window.gameLoop
+    );
+    return this.ready;
+  },
 
-  /* ---- safe refs (populated once game starts) ---- */
-  var gm, pd, md, ph, gl, im;
-  var ready = false;
-  var ownId = -1;
+  debug() {
+    const g = window.gameManager;
+    const p = window.playerData;
+    const m = window.mapData;
+    const l = window.gameLoop;
+    console.log('%c[ECHO] API Debug', 'color: #a855f7; font-weight: bold');
+    console.log('  gameManager:', !!g, g ? { ownId: g.OwnPlayerId, started: g.isGameStarted(), mode: g.gameMode, arraySize: g.arraySize } : null);
+    console.log('  playerData:', !!p, p ? { troopsLen: p.playerTroops?.length, landLen: p.landOwned?.length, tilesLen: p.playerTiles?.length } : null);
+    console.log('  mapData:', !!m, m ? { offsets: m.neighborOffsets, mapWidth: m.mapWidth } : null);
+    console.log('  protocolHandler:', !!window.protocolHandler);
+    console.log('  gameLoop:', !!l, l ? { tick: l.getTick() } : null);
+    console.log('  ECHO ready:', this.ready);
+  }
+};
 
-  function hook() {
-    try {
-      gm = window.gameManager;
-      pd = window.playerData;
-      md = window.mapData;
-      ph = window.protocolHandler;
-      gl = window.gameLoop;
-      im = window.incomeManager;
-      if (gm && pd && ph && gl && md) {
-        ownId = gm.OwnPlayerId;
-        ready = true;
-      }
-    } catch (e) { /* not ready yet */ }
-    return ready;
-  }
+window.EchoAPI = EchoAPI;
 
-  function gameOn() {
-    try { return gm && gm.isGameStarted && gm.isGameStarted(); } catch (e) { return false; }
-  }
 
-  function tick() {
-    try { return gl.getTick(); } catch (e) { return -1; }
-  }
+/* ================================================================
+ *  WINDOW MANAGER
+ * ================================================================ */
+var WindowManager = {
+  currentScreen: null,
 
-  function troops(id) {
-    try { return pd.playerTroops[id] || 0; } catch (e) { return 0; }
-  }
-  function land(id) {
-    try { return pd.landOwned[id] || 0; } catch (e) { return 0; }
-  }
-  function density(id) {
-    var l = land(id);
-    return l > 0 ? troops(id) / l : 0;
-  }
-  function totalMapLand() {
-    try { return gm.kD || 262144; } catch (e) { return 262144; }
-  }
-  function neutralId() {
-    try { return gm.yB; } catch (e) { return 0; }
-  }
-  function myIncomeRate() {
-    try { return im.getPlayerIncomeRate(ownId); } catch (e) { return 0; }
-  }
-
-  /* ---- attack helpers ---- */
-  function pctToRatio(pct) {
-    // pct: 0-100 â†’ ratio: 0-1023
-    return Math.max(MIN_RATIO, Math.min(MAX_RATIO, Math.round(1023 * pct / 100)));
-  }
-
-  function sendAtk(pct, targetId) {
-    try {
-      var ratio = pctToRatio(pct);
-      ph.gameCommandSender.attackTargetHandler(ratio, targetId);
-      return true;
-    } catch (e) { return false; }
-  }
-
-  function sendBoat(pct, targetId) {
-    try {
-      var ratio = pctToRatio(pct);
-      ph.gameCommandSender.sendBoatHandler(ratio, targetId);
-      return true;
-    } catch (e) { return false; }
-  }
-
-  function cancelAtk(targetId) {
-    try { ph.gameCommandSender.cancelAttackHandler(targetId); } catch (e) { /* */ }
-  }
-
-  /* ================================================================
-   *  CONQUEST PHASE (time-based)
-   *  divisor = u0 * mult, where u0 = 1 + floor(mapSize/300)
-   * ================================================================ */
-  var phaseName = 'IDLE';
-  var phaseDivisor = 1;
-  var phaseIsDef = false;
-
-  var PHASES = [
-    { end: 357,   mult: 1,   name: 'BLITZ' },
-    { end: 714,   mult: 4,   name: 'FAST' },
-    { end: 1071,  mult: 10,  name: 'MEDIUM' },
-    { end: 2142,  mult: 30,  name: 'SLOW' },
-    { end: 3213,  mult: 100, name: 'V.SLOW' },
-    { end: 1e9,   mult: -1,  name: 'DEFENSE' }
-  ];
-
-  function updatePhase(t) {
-    if (t < 0) { phaseName = 'IDLE'; return; }
-    var u0 = 1 + Math.floor(totalMapLand() / 300);
-    for (var i = 0; i < PHASES.length; i++) {
-      if (t < PHASES[i].end) {
-        if (PHASES[i].mult === -1) {
-          phaseName = 'DEFENSE';
-          phaseIsDef = true;
+  openWindow: function (screenName) {
+    if (this.currentScreen && typeof this.currentScreen.hide === 'function') {
+      this.currentScreen.hide();
+    }
+    switch (screenName) {
+      case 'echoSettings':
+      case 'settings':
+        if (typeof echoSettings !== 'undefined') {
+          echoSettings.show();
+          this.currentScreen = echoSettings;
         } else {
-          phaseName = PHASES[i].name;
-          phaseDivisor = PHASES[i].mult * u0;
-          phaseIsDef = false;
+          console.error('[ECHO] echoSettings is not loaded!');
         }
-        return;
-      }
+        break;
     }
+  },
+
+  closeCurrent: function () {
+    if (this.currentScreen && typeof this.currentScreen.hide === 'function') {
+      this.currentScreen.hide();
+    }
+    this.currentScreen = null;
+  },
+};
+
+
+/* ================================================================
+ *  MOBILE FLOATING TOGGLE BUTTON
+ * ================================================================ */
+function createMobileToggle() {
+  if (document.getElementById('echo-mobile-toggle')) return;
+
+  const btn = document.createElement('div');
+  btn.id = 'echo-mobile-toggle';
+  btn.textContent = 'E';
+  btn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    echoSettings.toggle();
+  });
+  document.body.appendChild(btn);
+
+  /* Make the toggle button itself draggable via touch */
+  let dragging = false, ox = 0, oy = 0;
+  let moved = false;
+
+  btn.addEventListener('touchstart', (e) => {
+    const t = e.touches[0];
+    const r = btn.getBoundingClientRect();
+    ox = t.clientX - r.left;
+    oy = t.clientY - r.top;
+    dragging = true;
+    moved = false;
+  }, { passive: true });
+
+  btn.addEventListener('touchmove', (e) => {
+    if (!dragging) return;
+    e.preventDefault();
+    moved = true;
+    const t = e.touches[0];
+    let nx = t.clientX - ox;
+    let ny = t.clientY - oy;
+    /* Clamp to viewport */
+    nx = Math.max(0, Math.min(window.innerWidth - 44, nx));
+    ny = Math.max(0, Math.min(window.innerHeight - 44, ny));
+    btn.style.left = nx + 'px';
+    btn.style.top = ny + 'px';
+    btn.style.right = 'auto';
+    btn.style.bottom = 'auto';
+  }, { passive: false });
+
+  btn.addEventListener('touchend', (e) => {
+    dragging = false;
+    /* If finger didn't move much, treat as tap (toggle handled by click) */
+    if (moved) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  });
+}
+
+
+/* ================================================================
+ *  ECHO SETTINGS GUI
+ * ================================================================ */
+function EchoSettings() {
+  if (!document.getElementById('echo-font')) {
+    const link = document.createElement('link');
+    link.id = 'echo-font';
+    link.rel = 'stylesheet';
+    link.href =
+      'https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Inter:wght@400;500&display=swap';
+    document.head.appendChild(link);
   }
 
-  /* ================================================================
-   *  INCOME HELPERS
-   * ================================================================ */
-  function isIncomeTick(t) { return t % INCOME_EVERY === INCOME_EVERY - 1; }
-  function isPreIncomeTick(t) { return t % INCOME_EVERY === INCOME_EVERY - 2; }
-  function inAugmentation(t) { return t < AUG_END; }
+  const style = document.createElement('style');
+  style.id = 'echo-gui-style';
+  style.innerHTML = `
+    :root {
+      --eg-bg:       #0d0b14;
+      --eg-surface:  #13101e;
+      --eg-border:   #2a1f4a;
+      --eg-accent:   #7c3aed;
+      --eg-accent2:  #a855f7;
+      --eg-text:     #c4b5fd;
+      --eg-muted:    #6d5d8a;
+      --eg-toggle-off: #2e2040;
+    }
 
-  /* ================================================================
-   *  CYCLE TRACKER
-   * ================================================================ */
-  var curTick = -1;
-  var tickChanged = false;
+    #echo-gui * { box-sizing: border-box; margin: 0; padding: 0; }
 
-  function updateCycle() {
-    var t = tick();
-    if (t <= curTick) { tickChanged = false; return; }
-    curTick = t;
-    tickChanged = true;
+    #echo-gui {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 280px;
+      max-width: calc(100vw - 16px);
+      max-height: calc(100vh - 80px);
+      background: var(--eg-bg);
+      border: 1px solid var(--eg-border);
+      border-radius: 10px;
+      color: var(--eg-text);
+      font-family: 'Inter', sans-serif;
+      font-size: 13px;
+      box-shadow: 0 0 0 1px #7c3aed22, 0 8px 32px #0007, inset 0 1px 0 #ffffff08;
+      display: none;
+      z-index: 999999;
+      user-select: none;
+      -webkit-user-select: none;
+      overflow: hidden;
+      touch-action: none;
+      -webkit-touch-callout: none;
+    }
+
+    #eg-titlebar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      background: var(--eg-surface);
+      border-bottom: 1px solid var(--eg-border);
+      cursor: move;
+      touch-action: none;
+      min-height: 44px;
+    }
+
+    #eg-logo {
+      font-family: 'Rajdhani', sans-serif;
+      font-weight: 700;
+      font-size: 15px;
+      letter-spacing: 2px;
+      color: var(--eg-accent2);
+      text-shadow: 0 0 12px #a855f766;
+      pointer-events: none;
+    }
+
+    #eg-close {
+      width: 32px;
+      height: 32px;
+      background: #3b2060;
+      border: none;
+      border-radius: 6px;
+      color: var(--eg-text);
+      cursor: pointer;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      line-height: 1;
+      transition: background .15s;
+      min-width: 44px;
+      min-height: 44px;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #eg-close:hover { background: var(--eg-accent); color: #fff; }
+    #eg-close:active { background: var(--eg-accent); color: #fff; transform: scale(0.95); }
+
+    #eg-tabs {
+      display: flex;
+      background: var(--eg-surface);
+      border-bottom: 1px solid var(--eg-border);
+    }
+
+    .eg-tab {
+      flex: 1;
+      padding: 10px 0;
+      text-align: center;
+      font-family: 'Rajdhani', sans-serif;
+      font-weight: 600;
+      font-size: 12px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: var(--eg-muted);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: color .15s, border-color .15s;
+      -webkit-tap-highlight-color: transparent;
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .eg-tab:hover { color: var(--eg-text); }
+    .eg-tab:active { color: var(--eg-text); }
+    .eg-tab.active {
+      color: var(--eg-accent2);
+      border-bottom: 2px solid var(--eg-accent);
+    }
+
+    #eg-content {
+      padding: 10px 14px 14px;
+      overflow-y: auto;
+      max-height: calc(100vh - 180px);
+      -webkit-overflow-scrolling: touch;
+    }
+
+    .eg-panel { display: none; }
+    .eg-panel.active { display: block; }
+
+    .eg-section {
+      font-family: 'Rajdhani', sans-serif;
+      font-weight: 700;
+      font-size: 10px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: var(--eg-accent);
+      margin: 10px 0 6px;
+      padding-bottom: 3px;
+      border-bottom: 1px solid var(--eg-border);
+    }
+    .eg-section:first-child { margin-top: 2px; }
+
+    .eg-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 0;
+      min-height: 44px;
+    }
+
+    .eg-label {
+      font-size: 13px;
+      color: #d8caff;
+      font-weight: 400;
+    }
+
+    .eg-toggle-wrap {
+      position: relative;
+      width: 44px;
+      height: 26px;
+      flex-shrink: 0;
+    }
+    .eg-toggle-wrap input {
+      opacity: 0;
+      width: 0; height: 0;
+      position: absolute;
+    }
+    .eg-toggle-track {
+      position: absolute;
+      inset: 0;
+      background: var(--eg-toggle-off);
+      border-radius: 26px;
+      cursor: pointer;
+      transition: background .2s;
+      border: 1px solid #3d2d5e;
+    }
+    .eg-toggle-track::after {
+      content: '';
+      position: absolute;
+      width: 20px;
+      height: 20px;
+      top: 2px;
+      left: 2px;
+      background: var(--eg-muted);
+      border-radius: 50%;
+      transition: transform .2s, background .2s;
+    }
+    .eg-toggle-wrap input:checked + .eg-toggle-track {
+      background: var(--eg-accent);
+      border-color: var(--eg-accent);
+    }
+    .eg-toggle-wrap input:checked + .eg-toggle-track::after {
+      transform: translateX(18px);
+      background: #fff;
+    }
+
+    .eg-slider-wrap {
+      display: flex;
+      flex-direction: column;
+      padding: 6px 0 8px;
+      gap: 6px;
+    }
+    .eg-slider-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .eg-slider-val {
+      font-family: 'Rajdhani', sans-serif;
+      font-weight: 600;
+      font-size: 12px;
+      color: var(--eg-accent2);
+    }
+    .eg-slider {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 4px;
+      border-radius: 4px;
+      background: var(--eg-border);
+      outline: none;
+      cursor: pointer;
+    }
+    .eg-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: var(--eg-accent2);
+      cursor: pointer;
+      box-shadow: 0 0 6px #a855f766;
+    }
+    .eg-slider::-moz-range-thumb {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: var(--eg-accent2);
+      cursor: pointer;
+      border: none;
+    }
+    .eg-slider:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+    .eg-slider:disabled::-webkit-slider-thumb { cursor: not-allowed; }
+
+    .eg-btn-row {
+      display: flex;
+      gap: 8px;
+      padding: 8px 0 4px;
+      margin-top: 14px;
+    }
+    .eg-btn {
+      flex: 1;
+      padding: 12px 0;
+      border: 1px solid var(--eg-border);
+      border-radius: 6px;
+      background: var(--eg-surface);
+      color: var(--eg-text);
+      font-family: 'Rajdhani', sans-serif;
+      font-weight: 600;
+      font-size: 12px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .eg-btn:hover { background: var(--eg-border); }
+    .eg-btn:active { background: var(--eg-border); transform: scale(0.97); }
+    .eg-btn.active {
+      background: var(--eg-accent);
+      border-color: var(--eg-accent);
+      color: #fff;
+    }
+
+    .eg-status {
+      font-family: 'Rajdhani', sans-serif;
+      font-size: 11px;
+      letter-spacing: 1px;
+      text-align: center;
+      padding: 4px 0 0;
+      color: var(--eg-muted);
+    }
+    .eg-status.on  { color: #4CAF50; }
+    .eg-status.off { color: #f44336; }
+
+    /* Mobile floating toggle button */
+    #echo-mobile-toggle {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      width: 44px;
+      height: 44px;
+      background: linear-gradient(135deg, #7c3aed, #a855f7);
+      border: 2px solid #a855f766;
+      border-radius: 12px;
+      color: #fff;
+      font-family: 'Rajdhani', sans-serif;
+      font-weight: 700;
+      font-size: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 999998;
+      cursor: pointer;
+      box-shadow: 0 2px 12px #7c3aed88, 0 0 20px #a855f733;
+      touch-action: none;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+      -webkit-user-select: none;
+      transition: transform 0.1s;
+    }
+    #echo-mobile-toggle:active {
+      transform: scale(0.92);
+    }
+  `;
+  if (!document.getElementById('echo-gui-style')) {
+    document.head.appendChild(style);
   }
 
-  /* ================================================================
-   *  ENEMY INTELLIGENCE
-   * ================================================================ */
-  var enemyCache = null;
-  var cacheTick = -1;
+  const toggle = (label, id) => `
+    <div class="eg-row">
+      <span class="eg-label">${label}</span>
+      <label class="eg-toggle-wrap">
+        <input type="checkbox" id="${id}">
+        <span class="eg-toggle-track"></span>
+      </label>
+    </div>`;
 
-  function getEnemies() {
-    if (cacheTick === curTick && enemyCache) return enemyCache;
-    cacheTick = curTick;
-    enemyCache = [];
-    try {
-      var as = gm.arraySize;
-      var nid = neutralId();
-      var myB = pd.gp ? pd.gp[ownId] : null;
-      if (!myB) return enemyCache;
+  const slider = (label, id, min, max, val, unit) => `
+    <div class="eg-slider-wrap">
+      <div class="eg-slider-header">
+        <span class="eg-label">${label}</span>
+        <span class="eg-slider-val" id="${id}-val">${val}${unit}</span>
+      </div>
+      <input class="eg-slider" type="range" id="${id}" min="${min}" max="${max}" value="${val}">
+    </div>`;
 
-      // Build set of my border tile indices
-      var mySet = new Set(myB);
+  this.gui = document.createElement('div');
+  this.gui.id = 'echo-gui';
+  this.gui.innerHTML = `
+    <div id="eg-titlebar">
+      <span id="eg-logo">ECHO</span>
+      <button id="eg-close">âœ•</button>
+    </div>
 
-      for (var pid = 0; pid < as; pid++) {
-        if (pid === ownId) continue;
-        if (!land(pid)) continue;
-        var tiles = pd.gp ? pd.gp[pid] : null;
-        if (!tiles || !tiles.length) continue;
-        var shared = 0;
-        for (var i = 0; i < tiles.length; i++) {
-          // Check 4-neighbors
-          var c = tiles[i];
-          if (mySet.has(c - 1) || mySet.has(c + 1) || mySet.has(c - as) || mySet.has(c + as)) {
-            shared++;
-          }
-        }
-        if (shared > 0) {
-          enemyCache.push({
-            id: pid,
-            shared: shared,
-            troops: troops(pid),
-            land: land(pid),
-            density: density(pid),
-            isNeutral: (pid === nid || pid === 0)
-          });
-        }
-      }
-    } catch (e) { /* */ }
-    return enemyCache;
-  }
+    <div id="eg-tabs">
+      <div class="eg-tab active" data-tab="opening">Opening</div>
+      <div class="eg-tab"        data-tab="visuals">Visuals</div>
+      <div class="eg-tab"        data-tab="micro">Micro</div>
+    </div>
 
-  function getThreats() {
-    var enemies = getEnemies();
-    var myT = troops(ownId);
-    var myD = density(ownId);
-    var myL = land(ownId);
-    var threats = [];
-    for (var i = 0; i < enemies.length; i++) {
-      var e = enemies[i];
-      if (e.isNeutral) continue;
-      var score = 0;
-      score += (e.troops / Math.max(1, myT)) * 30;
-      score += (e.density / Math.max(1, myD)) * 25;
-      score += (e.land / Math.max(1, myL)) * 15;
-      threats.push({
-        id: e.id, troops: e.troops, land: e.land,
-        density: e.density, threat: score,
-        isEasy: e.density < myD * 0.6
+    <div id="eg-content">
+
+      <div class="eg-panel active" id="panel-opening">
+        <div class="eg-section">Opening</div>
+        ${toggle('Auto Opening', 'opt-opening-open')}
+      </div>
+
+      <div class="eg-panel" id="panel-visuals">
+        <div class="eg-section">Players</div>
+        ${toggle('ESP', 'opt-esp')}
+        <div class="eg-section">World</div>
+        ${toggle('Fullbright', 'opt-fullbright')}
+      </div>
+
+      <div class="eg-panel" id="panel-micro">
+        <div class="eg-section">Auto Attack</div>
+        ${toggle('Attack Formula', 'opt-attack-formula')}
+        ${slider('Attack Percent', 'opt-attack-percent', 1, 30, 12, '%')}
+        ${slider('Interval', 'opt-attack-interval', 1, 667, 400, 'ms')}
+        <div class="eg-btn-row" style="margin-top: 14px;">
+          <button class="eg-btn" id="micro-start-btn">Start (Q)</button>
+          <button class="eg-btn" id="micro-stop-btn">Stop (E)</button>
+        </div>
+        <div class="eg-status off" id="micro-status">INACTIVE</div>
+        <div class="eg-section">Legit Attack</div>
+        ${toggle('Legit Mode', 'opt-legitmode')}
+      </div>
+
+    </div>
+  `;
+
+  const bindToggle = (id, fn) => {
+    const el = this.gui.querySelector(`#${id}`);
+    if (el) el.addEventListener('change', () => fn(el.checked));
+  };
+
+  const wireToggles = () => {
+    bindToggle('opt-opening-open', onAutoOpenToggle);
+    bindToggle('opt-esp', onESPToggle);
+    bindToggle('opt-fullbright', onFullbrightToggle);
+    bindToggle('opt-legitmode', onLegitModeToggle);
+
+    bindToggle('opt-attack-formula', (enabled) => {
+      microState.useFormula = enabled;
+      const ps = this.gui.querySelector('#opt-attack-percent');
+      if (ps) ps.disabled = enabled;
+    });
+
+    const pSlider = this.gui.querySelector('#opt-attack-percent');
+    const pVal = this.gui.querySelector('#opt-attack-percent-val');
+    if (pSlider)
+      pSlider.addEventListener('input', () => {
+        microState.attackPercent = parseInt(pSlider.value);
+        if (pVal) pVal.textContent = microState.attackPercent + '%';
       });
+
+    const iSlider = this.gui.querySelector('#opt-attack-interval');
+    const iVal = this.gui.querySelector('#opt-attack-interval-val');
+    if (iSlider)
+      iSlider.addEventListener('input', () => {
+        microState.intervalMs = parseInt(iSlider.value);
+        if (iVal) iVal.textContent = microState.intervalMs + 'ms';
+        if (microState.attackInterval !== null) {
+          clearInterval(microState.attackInterval);
+          microState.attackInterval = setInterval(
+            startMicro,
+            microState.intervalMs
+          );
+        }
+      });
+
+    const startBtn = this.gui.querySelector('#micro-start-btn');
+    const stopBtn = this.gui.querySelector('#micro-stop-btn');
+    if (startBtn) startBtn.addEventListener('click', startAutoAttack);
+    if (stopBtn) stopBtn.addEventListener('click', stopAutoAttack);
+  };
+
+  const bindTabs = () => {
+    this.gui.querySelectorAll('.eg-tab').forEach((tab) => {
+      tab.addEventListener('click', () => {
+        this.gui
+          .querySelectorAll('.eg-tab')
+          .forEach((t) => t.classList.remove('active'));
+        this.gui
+          .querySelectorAll('.eg-panel')
+          .forEach((p) => p.classList.remove('active'));
+        tab.classList.add('active');
+        const panel = this.gui.querySelector(`#panel-${tab.dataset.tab}`);
+        if (panel) panel.classList.add('active');
+      });
+    });
+  };
+
+  const bindClose = () => {
+    const btn = this.gui.querySelector('#eg-close');
+    if (btn) btn.addEventListener('click', () => this.hide());
+  };
+
+  const bindDrag = () => {
+    const bar = this.gui.querySelector('#eg-titlebar');
+    let ox = 0, oy = 0, dragging = false;
+
+    /* Mouse events (PC) */
+    bar.addEventListener('mousedown', (e) => {
+      if (e.target.id === 'eg-close') return;
+      dragging = true;
+      const r = this.gui.getBoundingClientRect();
+      ox = e.clientX - r.left;
+      oy = e.clientY - r.top;
+      e.preventDefault();
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      e.preventDefault();
+      this.gui.style.left = e.clientX - ox + 'px';
+      this.gui.style.top = e.clientY - oy + 'px';
+      this.gui.style.transform = 'none';
+    });
+
+    document.addEventListener('mouseup', () => {
+      dragging = false;
+    });
+
+    /* Touch events (Mobile) */
+    bar.addEventListener('touchstart', (e) => {
+      if (e.target.id === 'eg-close') return;
+      const t = e.touches[0];
+      const r = this.gui.getBoundingClientRect();
+      ox = t.clientX - r.left;
+      oy = t.clientY - r.top;
+      dragging = true;
+    }, { passive: true });
+
+    bar.addEventListener('touchmove', (e) => {
+      if (!dragging) return;
+      e.preventDefault();
+      const t = e.touches[0];
+      let nx = t.clientX - ox;
+      let ny = t.clientY - oy;
+      /* Clamp to viewport */
+      const gw = this.gui.offsetWidth;
+      const gh = this.gui.offsetHeight;
+      nx = Math.max(0, Math.min(window.innerWidth - gw, nx));
+      ny = Math.max(0, Math.min(window.innerHeight - gh, ny));
+      this.gui.style.left = nx + 'px';
+      this.gui.style.top = ny + 'px';
+      this.gui.style.transform = 'none';
+    }, { passive: false });
+
+    bar.addEventListener('touchend', () => {
+      dragging = false;
+    });
+  };
+
+  /* Prevent touch scroll/zoom inside GUI */
+  const bindTouchGuard = () => {
+    this.gui.addEventListener('touchmove', (e) => {
+      e.preventDefault();
+    }, { passive: false });
+  };
+
+  this.ensureMounted = () => {
+    if (!document.body.contains(this.gui)) {
+      document.body.appendChild(this.gui);
+      wireToggles();
+      bindTabs();
+      bindClose();
+      bindDrag();
+      bindTouchGuard();
+      createMobileToggle();
     }
-    threats.sort(function (a, b) { return b.threat - a.threat; });
-    return threats;
+  };
+
+  this.show = () => {
+    this.ensureMounted();
+    this.gui.style.display = 'block';
+  };
+  this.hide = () => {
+    this.gui.style.display = 'none';
+  };
+  this.toggle = () => {
+    this.gui.style.display === 'block' ? this.hide() : this.show();
+  };
+
+  this.setMicroStatus = (active) => {
+    const el = this.gui.querySelector('#micro-status');
+    const sb = this.gui.querySelector('#micro-start-btn');
+    if (!el) return;
+    el.textContent = active ? 'ACTIVE' : 'INACTIVE';
+    el.className = 'eg-status ' + (active ? 'on' : 'off');
+    if (sb) sb.classList.toggle('active', active);
+  };
+}
+
+var echoSettings = new EchoSettings();
+echoSettings.show();
+
+
+/* ================================================================
+ *  KEYBINDS (PC only â€” mobile uses the floating E button)
+ * ================================================================ */
+document.addEventListener('keydown', function (e) {
+  if (
+    e.target.tagName === 'TEXTAREA' ||
+    (e.target.tagName === 'INPUT' && e.target.type === 'text')
+  )
+    return;
+
+  const key = e.key;
+  if (key === 'o' || key === 'O') echoSettings.toggle();
+  if (key === 'q' || key === 'Q') {
+    e.preventDefault();
+    startAutoAttack();
   }
-
-  /* ================================================================
-   *  BOT STATE
-   * ================================================================ */
-  var stats = { attacks: 0, expansions: 0, retreats: 0, boats: 0, kills: 0 };
-  var lastAtkTick = {};
-  var activeTargets = {};
-  var underAttack = false;
-  var balanceHistory = [];
-  var openingDone = false;
-  var openingMoves = null;
-  var openingExecuted = {};
-
-  function canAfford(pct) {
-    var t = troops(ownId);
-    var l = land(ownId);
-    var remain = t * (1 - pct / 100);
-    return l > 0 ? (remain / l) >= 40 : remain > 500;
+  if (key === 'e' || key === 'E') {
+    e.preventDefault();
+    stopAutoAttack();
   }
+});
 
-  function maxSafePct() {
-    var t = troops(ownId);
-    var l = land(ownId);
-    if (l <= 0 || t <= 0) return 0;
-    var minT = l * 40;
-    var maxSend = t - minT;
-    return maxSend > 0 ? Math.min(99, (maxSend / t) * 100) : 0;
+
+/* ================================================================
+ *  MICRO STATE
+ * ================================================================ */
+const microState = {
+  attackPercent: 12,
+  intervalMs: 400,
+  useFormula: false,
+  attackInterval: null,
+  isAttacking: false,
+  attackQueue: [],
+  lastAttack: new Map(),
+  activeTargets: new Set(),
+};
+
+const MICRO_MAX_DENSITY = 0.5;
+const MICRO_MAX_ATTACKS_PER_CYCLE = 1;
+const MICRO_DELAY_BETWEEN_ATTACKS_MS = 1;
+const MICRO_MIN_ATTACK_INTERVAL_TARGET = 5000;
+
+const percentToValue = (p) =>
+  Math.max(0, Math.min(1023, Math.floor(1024 * (p / 100) + 0.5) - 1));
+
+
+/* ================================================================
+ *  CORE FUNCTIONS  (hooks for deobfuscated script.js)
+ * ================================================================ */
+
+function getMyPlayerId() {
+  try {
+    const id = window.gameManager?.OwnPlayerId;
+    return (id != null && id !== -1) ? id : null;
+  } catch {
+    return null;
   }
+}
 
-  function perfectPct() {
-    var t = troops(ownId);
-    var l = land(ownId);
-    if (t <= 0 || l <= 0) return 0;
-    var ideal = l * SOFT_CAP;
-    var excess = t - ideal;
-    if (excess <= 0) return 0.1;
-    var pct = (excess / t) * 100;
-    if (pct >= 50) {
-      var tax = Math.floor(ATTACK_TAX * t);
-      pct = Math.min(99, ((excess + tax) / t) * 100);
-    }
-    return Math.max(0.1, Math.min(99, pct));
+function getTicks() {
+  try {
+    return window.gameLoop?.getTick();
+  } catch {
+    return null;
   }
+}
 
-  function execute(pct, targetId) {
-    if (pct <= 0) return false;
-    if (!canAfford(pct)) return false;
-    var last = lastAtkTick[targetId] || -100;
-    if (curTick - last < 1) return false;
-    if (sendAtk(pct, targetId)) {
-      lastAtkTick[targetId] = curTick;
-      activeTargets[targetId] = true;
-      stats.attacks++;
-      return true;
-    }
+function getGameStarted() {
+  try {
+    return window.gameManager?.isGameStarted();
+  } catch {
     return false;
   }
+}
 
-  function detectIncoming() {
-    var t = troops(ownId);
-    balanceHistory.push({ tick: curTick, troops: t });
-    if (balanceHistory.length > 5) balanceHistory.shift();
-    if (balanceHistory.length >= 2) {
-      var prev = balanceHistory[balanceHistory.length - 2];
-      var curr = balanceHistory[balanceHistory.length - 1];
-      var drop = prev.troops - curr.troops;
-      var activeCount = Object.keys(activeTargets).length;
-      var expectedTax = activeCount * (t * ATTACK_TAX);
-      underAttack = drop > expectedTax + t * 0.03;
-    }
+function attackTarget(unitRatio, targetPlayerId) {
+  try {
+    return window.protocolHandler?.gameCommandSender.attackTargetHandler(
+      unitRatio,
+      targetPlayerId
+    );
+  } catch (e) {
+    console.error('[ECHO] attackTarget failed:', e);
+    return false;
   }
+}
 
-  function retreat() {
-    if (!underAttack) return;
-    if (density(ownId) >= SOFT_CAP) return;
-    var threats = getThreats();
-    var ids = Object.keys(activeTargets);
-    for (var i = 0; i < ids.length; i++) {
-      var tid = parseInt(ids[i]);
-      for (var j = 0; j < threats.length; j++) {
-        if (threats[j].id === tid && threats[j].threat > 30) {
-          cancelAtk(tid);
-          delete activeTargets[tid];
-          stats.retreats++;
+function attackTargetSP(ownPlayerId, unitRatio, targetPlayer) {
+  try {
+    return window.protocolHandler?.localCommandProcessor.attackTargetSp(
+      ownPlayerId,
+      unitRatio,
+      targetPlayer
+    );
+  } catch (e) {
+    console.error('[ECHO] attackTargetSP failed:', e);
+    return false;
+  }
+}
+
+/**
+ * Find enemy player IDs that share a border with us.
+ */
+function findBorderingIds(myCells, allBorders, offsets, totalPlayers, myId) {
+  if (!myCells || !allBorders || !offsets) return new Map();
+
+  const cellSet = new Set(myCells);
+  const neighbors = new Map();
+
+  for (let i = 0; i < totalPlayers; i++) {
+    if (i === myId || !allBorders[i]) continue;
+    let shared = 0;
+    const enemyTiles = allBorders[i];
+    for (let t = 0, len = enemyTiles.length; t < len; t++) {
+      const c = enemyTiles[t];
+      for (let d = 0; d < offsets.length; d++) {
+        if (cellSet.has(c - offsets[d])) {
+          shared++;
           break;
         }
       }
     }
+    if (shared > 0) neighbors.set(i, shared);
+  }
+  return neighbors;
+}
+
+async function processMicroQueue(myTroops) {
+  if (microState.isAttacking || !microState.attackQueue.length) return;
+  microState.isAttacking = true;
+  let sent = 0;
+
+  while (
+    microState.attackQueue.length > 0 &&
+    sent < MICRO_MAX_ATTACKS_PER_CYCLE
+  ) {
+    const enemy = microState.attackQueue.shift();
+    if (!enemy) continue;
+
+    const now = Date.now();
+    const last = microState.lastAttack.get(enemy.id) || 0;
+    if (now - last < MICRO_MIN_ATTACK_INTERVAL_TARGET) continue;
+
+    let percent;
+    if (microState.useFormula) {
+      const needed = (enemy.troops + enemy.land) * 2.35;
+      percent = Math.max(
+        1,
+        Math.min(100, Math.round((needed / Math.max(1, myTroops)) * 100))
+      );
+    } else {
+      percent = microState.attackPercent;
+    }
+
+    attackTarget(percentToValue(percent), enemy.id);
+    microState.lastAttack.set(enemy.id, now);
+    microState.activeTargets.add(enemy.id);
+    sent++;
+
+    if (microState.attackQueue.length && sent < MICRO_MAX_ATTACKS_PER_CYCLE)
+      await new Promise((r) => setTimeout(r, MICRO_DELAY_BETWEEN_ATTACKS_MS));
   }
 
-  /* ================================================================
-   *  OPENING ENGINE â€” built when game starts (neutral ID known)
-   * ================================================================ */
-  function buildOpening() {
-    var nid = neutralId();
-    openingMoves = [
-      // BLITZ: send full during cheapest conquest
-      { t: 10,  p: 99,  tgt: nid },
-      { t: 30,  p: 0.1, tgt: nid },
-      { t: 60,  p: 85,  tgt: nid },
-      { t: 81,  p: 0.1, tgt: nid },
-      // FAST: multiple waves
-      { t: 150, p: 60, tgt: nid },
-      { t: 165, p: 0.1, tgt: nid },
-      { t: 172, p: 80, tgt: nid },
-      { t: 186, p: 0.1, tgt: nid },
-      // MEDIUM: start interest farming
-      { t: 256, p: 0.1, tgt: nid },
-      { t: 263, p: 45, tgt: nid },
-      { t: 270, p: 0.1, tgt: nid },
-      { t: 284, p: 35, tgt: nid },
-      // SLOW: minimal attacks, maximize interest
-      { t: 354, p: 0.1, tgt: nid },
-      { t: 361, p: 25, tgt: nid },
-      { t: 375, p: 0.1, tgt: nid },
-      { t: 382, p: 20, tgt: nid }
-    ];
-    openingDone = false;
-    openingExecuted = {};
+  microState.isAttacking = false;
+}
+
+function startMicro() {
+  if (!EchoAPI.check()) {
+    console.warn('[ECHO] Game API not ready yet');
+    return;
   }
 
-  function processOpening() {
-    if (openingDone || !openingMoves) return;
-    for (var i = 0; i < openingMoves.length; i++) {
-      var m = openingMoves[i];
-      if (m.t === curTick && !openingExecuted[m.t]) {
-        openingExecuted[m.t] = true;
-        sendAtk(m.p, m.tgt);
-        stats.expansions++;
-      }
-    }
-    if (curTick > 500) openingDone = true;
-  }
+  const playerData = window.playerData;
+  const mapData = window.mapData;
 
-  /* ================================================================
-   *  EXPANSION ENGINE â€” density-perfect
-   * ================================================================ */
-  function processExpansion() {
-    if (!openingDone) return;
-    if (underAttack && density(ownId) < 80) return;
+  const troopData = playerData.playerTroops;
+  const landData = playerData.landOwned;
+  const borders = playerData.playerTiles;
+  const offsets = mapData.neighborOffsets;
+  if (!troopData || !landData || !borders || !offsets) return;
 
-    var myD = density(ownId);
-    var myT = troops(ownId);
-    var myL = land(ownId);
-    if (myT <= 0 || myL <= 0) return;
-    if (myD >= HARD_CAP) return;
+  const myId = getMyPlayerId();
+  if (myId == null || !borders[myId]) return;
 
-    var nid = neutralId();
+  const myTroops = troopData[myId] || 1;
 
-    // DEFENSE PHASE: slow reinforcement
-    if (phaseIsDef) {
-      if (curTick % 2 === 0) {
-        if (myD > SOFT_CAP) {
-          var p = perfectPct();
-          if (p > 0.1) execute(p, nid);
-        } else {
-          execute(0.1, nid);
-        }
-      }
-      return;
-    }
-
-    // PRE-INCOME: attack 1 tick before interest so new land earns next tick
-    if (isPreIncomeTick(curTick)) {
-      var p = perfectPct();
-      if (p >= 0.1) { execute(p, nid); stats.expansions++; }
-      return;
-    }
-
-    // On income tick: DO NOT attack, let interest compound
-    if (isIncomeTick(curTick)) return;
-
-    // RED ZONE: above soft cap, dump excess
-    if (myD > SOFT_CAP) {
-      var p = perfectPct();
-      if (p >= 1) { execute(p, nid); stats.expansions++; }
-      return;
-    }
-
-    // Periodic expansion every 3 ticks when density is good
-    if (curTick % 3 === 0 && myD > 90) {
-      var p = perfectPct();
-      if (p >= 0.5) { execute(p, nid); stats.expansions++; }
+  // Clean up dead/eliminated targets
+  for (const id of [...microState.activeTargets]) {
+    if (!landData[id] || landData[id] === 0) {
+      microState.activeTargets.delete(id);
+      microState.lastAttack.delete(id);
     }
   }
 
-  /* ================================================================
-   *  COMBAT ENGINE â€” auto-attack enemies
-   * ================================================================ */
-  function processCombat() {
-    if (!openingDone) return;
-    if (underAttack && density(ownId) < 60) return;
+  // Find bordering enemies
+  const borderNeighbors = findBorderingIds(
+    borders[myId],
+    borders,
+    offsets,
+    window.gameManager.arraySize,
+    myId
+  );
 
-    var enemies = getEnemies();
-    var targets = [];
-    for (var i = 0; i < enemies.length; i++) {
-      var e = enemies[i];
-      if (e.isNeutral) continue;
-      if (e.land <= 0 || e.troops <= 0) continue;
-      targets.push(e);
-    }
-    if (!targets.length) return;
-
-    // Clean dead targets
-    var ids = Object.keys(activeTargets);
-    for (var i = 0; i < ids.length; i++) {
-      var tid = parseInt(ids[i]);
-      if (!land(tid)) {
-        delete activeTargets[tid];
-        stats.kills++;
-      }
-    }
-
-    var myD = density(ownId);
-    if (myD < 50) return;
-
-    // Sort: easiest first
-    targets.sort(function (a, b) { return a.density - b.density; });
-
-    // Attack on ticks 5,6 of each 10-tick cycle (don't conflict with expansion at tick 8)
-    var tic = curTick % INCOME_EVERY;
-    if (tic !== 5 && tic !== 6) return;
-
-    var budget = maxSafePct();
-    var maxTargets = Math.min(targets.length, 3);
-    var used = 0;
-
-    for (var i = 0; i < maxTargets; i++) {
-      var e = targets[i];
-      if (used + 5 > budget) break;
-      var pct;
-      if (e.density < myD * 0.5) {
-        pct = Math.min(30, budget - used);
-      } else if (e.density < myD * 0.8) {
-        var ratio = myD / Math.max(1, e.density);
-        pct = Math.max(3, Math.min(25, 15 / ratio));
-      } else {
-        pct = 3;
-      }
-      pct = Math.min(pct, budget - used);
-      if (pct >= 1 && execute(pct, e.id)) used += pct;
-    }
+  // Build candidate list (filter by density)
+  const candidates = [];
+  for (const [enemyId, shared] of borderNeighbors) {
+    const troops = troopData[enemyId];
+    const land = landData[enemyId];
+    if (troops == null || troops === 0) continue;
+    if (land > 0 && troops / land > MICRO_MAX_DENSITY) continue;
+    candidates.push({ id: enemyId, troops, land, sharedBorderCount: shared });
   }
 
-  /* ================================================================
-   *  BOAT ENGINE
-   * ================================================================ */
-  var lastBoatTick = -100;
+  candidates.sort((a, b) => b.sharedBorderCount - a.sharedBorderCount);
+  microState.attackQueue = candidates.slice();
 
-  function processBoats() {
-    if (!openingDone) return;
-    if (curTick - lastBoatTick < 30) return;
-    if (density(ownId) < 80) return;
+  if (microState.attackQueue.length && !microState.isAttacking)
+    void processMicroQueue(myTroops);
+}
 
-    var enemies = getEnemies();
-    var myD = density(ownId);
-    for (var i = 0; i < enemies.length; i++) {
-      var e = enemies[i];
-      if (e.isNeutral) continue;
-      if (e.density >= myD * 0.7) continue;
-      var pct = Math.max(3, Math.min(8, Math.round(
-        (1 - e.density / Math.max(1, myD)) * 10
-      )));
-      if (canAfford(pct) && troops(ownId) * pct / 100 >= 60) {
-        if (sendBoat(pct, e.id)) {
-          lastBoatTick = curTick;
-          stats.boats++;
-          return;
-        }
-      }
-    }
+function startAutoAttack() {
+  if (microState.attackInterval) return;
+  startMicro();
+  microState.attackInterval = setInterval(startMicro, microState.intervalMs);
+  echoSettings.setMicroStatus(true);
+}
+
+function stopAutoAttack() {
+  clearInterval(microState.attackInterval);
+  microState.attackInterval = null;
+  microState.attackQueue = [];
+  microState.isAttacking = false;
+  echoSettings.setMicroStatus(false);
+}
+
+
+/* ================================================================
+ *  FEATURES
+ * ================================================================ */
+const features = { autoOpen: false };
+
+function onAutoOpenToggle(enabled) {
+  features.autoOpen = enabled;
+  console.log('[ECHO] Auto Opening:', enabled ? 'ON' : 'OFF');
+}
+function onESPToggle(enabled) {
+  console.log('[ECHO] ESP:', enabled ? 'ON' : 'OFF');
+}
+function onFullbrightToggle(enabled) {
+  console.log('[ECHO] Fullbright:', enabled ? 'ON' : 'OFF');
+}
+function onLegitModeToggle(enabled) {
+  console.log('[ECHO] Legit Mode:', enabled ? 'ON' : 'OFF');
+}
+
+
+/* ================================================================
+ *  AUTO OPENING
+ * ================================================================ */
+function startAutoOpen(ticks) {
+  const NEUTRAL_ID = window.gameManager?.arraySize || 512;
+
+  switch (ticks) {
+     // Cycle 1: 144L, 799T
+    case 60: attackTarget(percentToValue(20.800), 512); break;
+    case 81: attackTarget(percentToValue(17.871), 512); break;
+
+    // Cycle 2: 544L , 1045T
+    case 151: attackTarget(percentToValue(16.7), 512); break;
+    case 165: attackTarget(percentToValue(18.55), 512); break;
+    case 172: attackTarget(percentToValue(39.84), 512); break;
+    case 186: attackTarget(percentToValue(24.12), 512); break;
+
+    // Cycle 3: 1104L , 1656T
+    case 256: attackTarget(percentToValue(0.1), 512); break;
+    case 263: attackTarget(percentToValue(22.3633), 512); break;
+    case 270: attackTarget(percentToValue(52.54), 512); break;
+    case 284: attackTarget(percentToValue(29.98), 512); break;
+
+    // Cycle 4:2244L , 2484T
+    case 354: attackTarget(percentToValue(0.01), 512); break;
+    case 361: attackTarget(percentToValue(47.07), 512); break;
+    case 375: attackTarget(percentToValue(35.84), 512); break;
+    case 382: attackTarget(percentToValue(87.4), 512); break;
+
+    // Cycle 5:3784L , 4378T
+    case 452: attackTarget(percentToValue(28.61), 512); break;
+    case 466: attackTarget(percentToValue(23.73), 512); break;
+    case 473: attackTarget(percentToValue(31.64), 512); break;
+    case 480: attackTarget(percentToValue(71), 512); break;
+  }
+}
+
+
+/* ================================================================
+ *  MAIN CLIENT LOOP
+ * ================================================================ */
+let lastTick = -1;
+
+function clientLoop() {
+  const ticks = getTicks();
+  const gameStarted = getGameStarted();
+
+  if (!gameStarted) {
+    lastTick = -1;
+    requestAnimationFrame(clientLoop);
+    return;
   }
 
-  /* ================================================================
-   *  GUI â€” minimal status overlay, no toggles
-   * ================================================================ */
-  var guiEl = null;
-  var guiCounter = 0;
-
-  function createGUI() {
-    if (document.getElementById('m5-gui')) return;
-    try {
-      var s = document.createElement('style');
-      s.id = 'm5-style';
-      s.textContent =
-        '#m5-gui{position:fixed;top:8px;left:8px;background:rgba(10,8,18,.92);border:1px solid #2a1f4a;border-radius:8px;padding:8px 12px;color:#fde68a;font:11px/1.5 Rajdhani,sans-serif;z-index:999999;user-select:none;-webkit-user-select:none;pointer-events:none;min-width:160px}' +
-        '#m5-gui b{color:#fbbf24;font-size:12px;letter-spacing:1px}' +
-        '.m5r{display:flex;justify-content:space-between;gap:12px}' +
-        '.m5v{color:#fbbf24;font-weight:600;text-align:right}' +
-        '.m5p{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;letter-spacing:1px;margin-left:4px}' +
-        '.m5p.BLITZ{background:#ef444444;color:#ef4444}' +
-        '.m5p.FAST{background:#f9731644;color:#f97316}' +
-        '.m5p.MEDIUM{background:#eab30844;color:#eab308}' +
-        '.m5p.SLOW{background:#22c55e44;color:#22c55e}' +
-        '.m5p.V.SLOW{background:#3b82f644;color:#3b82f6}' +
-        '.m5p.DEFENSE{background:#a855f744;color:#a855f7}' +
-        '.m5p.IDLE{color:#6b7280}';
-      document.head.appendChild(s);
-
-      var g = document.createElement('div');
-      g.id = 'm5-gui';
-      g.innerHTML =
-        '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">' +
-        '<b>MESSIAH v5</b><span class="m5p IDLE" id="m5-ph">IDLE</span></div>' +
-        '<div class="m5r"><span>Tick</span><span class="m5v" id="m5-tk">-</span></div>' +
-        '<div class="m5r"><span>Troops</span><span class="m5v" id="m5-tr">-</span></div>' +
-        '<div class="m5r"><span>Land</span><span class="m5v" id="m5-ln">-</span></div>' +
-        '<div class="m5r"><span>Density</span><span class="m5v" id="m5-dn">-</span></div>' +
-        '<div class="m5r"><span>Income</span><span class="m5v" id="m5-ic">-</span></div>' +
-        '<div class="m5r"><span>Enemies</span><span class="m5v" id="m5-en">-</span></div>' +
-        '<div class="m5r"><span>Atk/Kill</span><span class="m5v" id="m5-st">0/0</span></div>';
-      document.body.appendChild(g);
-      guiEl = g;
-    } catch (e) { /* GUI creation failed, bot still works */ }
+  if (ticks == null) {
+    requestAnimationFrame(clientLoop);
+    return;
   }
 
-  function fmt(n) {
-    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
-    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
-    return Math.round(n) + '';
+  if (features.autoOpen && ticks !== lastTick) {
+    lastTick = ticks;
+    startAutoOpen(ticks);
   }
 
-  function updateGUI() {
-    if (!guiEl) return;
-    try {
-      var ph2 = guiEl.querySelector('#m5-ph');
-      if (ph2) { ph2.textContent = phaseName; ph2.className = 'm5p ' + phaseName; }
-      var s = function (id, v) { var e = guiEl.querySelector('#' + id); if (e) e.textContent = v; };
-      s('m5-tk', curTick);
-      s('m5-tr', fmt(troops(ownId)));
-      s('m5-ln', fmt(land(ownId)));
-      s('m5-dn', density(ownId).toFixed(1));
-      s('m5-ic', myIncomeRate());
-      s('m5-en', getEnemies().length);
-      s('m5-st', stats.attacks + '/' + stats.kills);
-    } catch (e) { /* */ }
-  }
+  requestAnimationFrame(clientLoop);
+}
 
-  /* ================================================================
-   *  MAIN LOOP
-   * ================================================================ */
-  var wasInGame = false;
+requestAnimationFrame(clientLoop);
 
-  function resetState() {
-    curTick = -1;
-    tickChanged = false;
-    openingDone = false;
-    openingMoves = null;
-    openingExecuted = {};
-    lastAtkTick = {};
-    activeTargets = {};
-    underAttack = false;
-    balanceHistory = [];
-    lastBoatTick = -100;
-    cacheTick = -1;
-    enemyCache = null;
-    stats = { attacks: 0, expansions: 0, retreats: 0, boats: 0, kills: 0 };
-    wasInGame = false;
-  }
-
-  function mainLoop() {
-    try {
-      // Wait for game objects to exist
-      if (!hook()) {
-        requestAnimationFrame(mainLoop);
-        return;
-      }
-
-      // Update ownId each frame (changes when you join a new game)
-      ownId = gm.OwnPlayerId;
-
-      var on = gameOn();
-
-      if (!on) {
-        // Game not running â€” reset if we were in a game
-        if (wasInGame) resetState();
-        wasInGame = false;
-        requestAnimationFrame(mainLoop);
-        return;
-      }
-
-      // Game just started â€” build opening
-      if (!wasInGame) {
-        wasInGame = true;
-        buildOpening();
-      }
-
-      updateCycle();
-      if (!tickChanged) { requestAnimationFrame(mainLoop); return; }
-
-      updatePhase(curTick);
-      detectIncoming();
-      if (underAttack) retreat();
-
-      processOpening();
-      processExpansion();
-      processCombat();
-      processBoats();
-
-      // GUI update every 5 ticks
-      guiCounter++;
-      if (guiCounter >= 5) {
-        guiCounter = 0;
-        updateGUI();
-      }
-    } catch (e) {
-      // SILENT â€” game error handler would show popup otherwise
-    }
-
-    requestAnimationFrame(mainLoop);
-  }
-
-  /* ================================================================
-   *  INIT
-   * ================================================================ */
-  try {
-    createGUI();
-    requestAnimationFrame(mainLoop);
-    console.log('%c[MESSIAH v5] Fully automatic â€” zero toggles', 'color:#f59e0b;font-weight:bold;font-size:14px');
-  } catch (e) {
-    // Absolute last resort fallback â€” retry in 1 second
-    setTimeout(function () {
-      try { createGUI(); requestAnimationFrame(mainLoop); } catch (e2) { /* */ }
-    }, 1000);
-  }
-
-  // Debug helper
-  window.EchoAPI = {
-    ready: function () { return ready; },
-    debug: function () {
-      console.log('%c[MESSIAH v5]', 'color:#f59e0b;font-weight:bold;font-size:14px');
-      console.log('  ownId:', ownId, 'tick:', curTick, 'mapLand:', totalMapLand());
-      console.log('  troops:', troops(ownId), 'land:', land(ownId), 'density:', density(ownId).toFixed(1));
-      console.log('  phase:', phaseName, 'divisor:', phaseDivisor);
-      console.log('  income:', myIncomeRate(), 'enemies:', getEnemies().length);
-      console.log('  neutralId:', neutralId(), 'arraySize:', gm ? gm.arraySize : '?');
-    }
-  };
-
-})();
+console.log('%c[ECHO] Client v2 Mobile loaded', 'color: #a855f7; font-weight: bold');
+console.log('[ECHO] Press O to toggle GUI, Q/E to start/stop micro');
+console.log('[ECHO] Mobile: tap the E button to toggle GUI');
+console.log('[ECHO] Type EchoAPI.debug() to verify game hooks');
