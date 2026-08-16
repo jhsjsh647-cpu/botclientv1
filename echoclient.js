@@ -1,1001 +1,1025 @@
 /* ================================================================
- *  ZYROX MESSIAH v5 â€” BEYOND MESSIAH
+ *  ECHO Client v2 â€” Mobile Edition
  *  ----------------------------------------------------------------
- *  Fully automatic with optional micro-controls.
- *  All engines active. GUI with tabs.
- *  Based on exact decompiled game source (31957 lines).
- *
- *  Hooks: window.gameManager, window.playerData, window.mapData,
- *  window.protocolHandler, window.gameLoop, window.incomeManager
+ *  Designed to work with the deobfuscated script.js (v2.16.x)
+ *  All hooks use the readable variable names: gameManager, playerData,
+ *  mapData, protocolHandler, gameLoop, etc.
+ *  Mobile: touch drag, floating toggle button, larger tap targets
  * ================================================================ */
 
-(function () {
-  'use strict';
+/* â”€â”€ API Verification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+const EchoAPI = {
+  ready: false,
+  lastCheck: 0,
 
-  /* ================================================================
-   *  CONSTANTS
-   * ================================================================ */
-  var M = {
-    TICK_MS: 56,
-    INCOME_INTERVAL: 10,
-    AUGMENTATION_END: 1920,
-    MAX_INCOME_RATE: 700,
-    SOFT_CAP_MULT: 100,
-    HARD_CAP_MULT: 150,
-    PERFECT_DENSITY: 100,
-    ATTACK_TAX: 12 / 1024,
-    TAX_THRESHOLD: 0.5,
-    MIN_ATTACK: 1 / 1024,
-    CONQUEST_BATCH: 2048,
-    MIN_TROOPS_PER_TILE: 2,
-    MAX_BALANCE: 1e9,
-    SERVER_THROTTLE_MS: 1000,
-    STARTING_BALANCE: 512,
-    CONQUEST_PHASES: [
-      { endTick: 357, mult: 1 },
-      { endTick: 714, mult: 4 },
-      { endTick: 1071, mult: 10 },
-      { endTick: 2142, mult: 30 },
-      { endTick: 3213, mult: 100 },
-      { endTick: Infinity, mult: -1 }
-    ],
-    CMD_ATTACK: 1,
-    CMD_BOAT: 3,
-    CMD_CANCEL: 5,
-    CMD_DONATE: 2
-  };
+  check() {
+    this.ready = !!(
+      window.gameManager &&
+      window.playerData &&
+      window.mapData &&
+      window.protocolHandler &&
+      window.gameLoop
+    );
+    return this.ready;
+  },
 
-  /* ================================================================
-   *  SAFE API HOOKS
-   * ================================================================ */
-  var API = {
-    _ready: false,
-    _gm: null, _pd: null, _md: null, _ph: null, _gl: null, _im: null,
-
-    check: function () {
-      try {
-        this._gm = window.gameManager;
-        this._pd = window.playerData;
-        this._md = window.mapData;
-        this._ph = window.protocolHandler;
-        this._gl = window.gameLoop;
-        this._im = window.incomeManager;
-        this._ready = !!(this._gm && this._pd && this._md && this._ph && this._gl);
-      } catch (e) { this._ready = false; }
-      return this._ready;
-    },
-
-    get myId() { try { return this._gm.OwnPlayerId; } catch (e) { return 0; } },
-    get arraySize() { try { return this._gm.arraySize; } catch (e) { return 512; } },
-    get mapLand() { try { return this._gm.kD || 262144; } catch (e) { return 262144; } },
-    get neutralId() { try { return this._gm.yB; } catch (e) { return 0; } },
-    get conquestCost() { try { return this._gm.gS; } catch (e) { return 2; } },
-
-    troops: function (id) { try { return this._pd.playerTroops[id] || 0; } catch (e) { return 0; } },
-    land: function (id) { try { return this._pd.landOwned[id] || 0; } catch (e) { return 0; } },
-    density: function (id) { var l = this.land(id); return l > 0 ? this.troops(id) / l : 0; },
-    borderTiles: function (id) { try { return this._pd.gp ? this._pd.gp[id] : null; } catch (e) { return null; } },
-    borderCount: function (id) { var b = this.borderTiles(id); return b ? b.length : 0; },
-    isAlive: function (id) { try { return this._pd.isOwnPlayerValid ? this._pd.isOwnPlayerValid[id] : this.land(id) > 0; } catch (e) { return false; } },
-    isEliminated: function (id) { try { return this._pd.a4V ? this._pd.a4V[id] === 2 : false; } catch (e) { return false; } },
-    incomeRate: function (id) { try { return this._im.getPlayerIncomeRate(id); } catch (e) { return 0; } },
-    redCap: function (id) { try { return this._im.getRedInterestCap(id); } catch (e) { return 0; } },
-    gameStarted: function () { try { return this._gm.isGameStarted && this._gm.isGameStarted(); } catch (e) { return false; } },
-    getTick: function () { try { return this._gl.getTick(); } catch (e) { return -1; } }
-  };
-
-  window.EchoAPI = {
-    ready: false,
-    check: function () { API.check(); this.ready = API._ready; return this.ready; },
-    debug: function () {
-      console.log('%c[MESSIAH v5]', 'color:#f59e0b;font-weight:bold;font-size:14px');
-      console.log('  myId:', API.myId, 'tick:', API.getTick(), 'mapLand:', API.mapLand);
-      console.log('  troops:', API.troops(API.myId), 'land:', API.land(API.myId),
-        'density:', API.density(API.myId).toFixed(1));
-      console.log('  borders:', API.borderCount(API.myId), 'phase:', Phase.name);
-      console.log('  income:', API.incomeRate(API.myId), 'neutralId:', API.neutralId);
-    }
-  };
-
-  /* ================================================================
-   *  CONQUEST PHASE â€” time-based attack power
-   * ================================================================ */
-  var Phase = {
-    name: 'IDLE', divisor: 1, isDefense: false, u0: 875,
-
-    update: function (tick) {
-      if (tick < 0) { this.name = 'IDLE'; return; }
-      this.u0 = 1 + Math.floor(API.mapLand / 300);
-      var names = ['BLITZ', 'FAST', 'MEDIUM', 'SLOW', 'V.SLOW'];
-      for (var i = 0; i < M.CONQUEST_PHASES.length; i++) {
-        if (tick < M.CONQUEST_PHASES[i].endTick) {
-          if (M.CONQUEST_PHASES[i].mult === -1) {
-            this.name = 'DEFENSE'; this.isDefense = true;
-          } else {
-            this.name = names[i];
-            this.divisor = M.CONQUEST_PHASES[i].mult * this.u0;
-            this.isDefense = false;
-          }
-          return;
-        }
-      }
-    },
-
-    attackPower: function (troopsSent, targetDefense) {
-      if (this.isDefense) {
-        return 2 + Math.floor((100 * troopsSent + 0.5) / Math.max(1, targetDefense));
-      }
-      return 2 + Math.floor((100 * troopsSent + 0.5) / Math.max(1, this.divisor));
-    },
-
-    tilesPerWave: function (attackTroops, targetDefense) {
-      var power = this.attackPower(attackTroops, targetDefense);
-      return Math.floor(attackTroops / Math.max(1, M.MIN_TROOPS_PER_TILE));
-    }
-  };
-
-  /* ================================================================
-   *  INCOME ENGINE â€” exact game formula
-   * ================================================================ */
-  var Income = {
-    getMyRate: function () {
-      try { return API.incomeRate(API.myId); } catch (e) { return 0; }
-    },
-    predictedGain: function () {
-      var rate = this.getMyRate();
-      var balance = API.troops(API.myId);
-      return Math.max(1, Math.floor(rate * balance / 10000));
-    },
-    ticksUntilIncome: function () {
-      var t = Cycle.tick;
-      var next = Math.ceil((t + 1) / M.INCOME_INTERVAL) * M.INCOME_INTERVAL - 1;
-      return next - t;
-    },
-    isIncomeTick: function (t) { return t % M.INCOME_INTERVAL === M.INCOME_INTERVAL - 1; },
-    isPreIncomeTick: function (t) { return t % M.INCOME_INTERVAL === M.INCOME_INTERVAL - 2; }
-  };
-
-  /* ================================================================
-   *  CYCLE TRACKER
-   * ================================================================ */
-  var Cycle = {
-    tick: -1, prevTick: -1, tickChanged: false, cycle: 0,
-    update: function () {
-      try {
-        var t = API.getTick();
-        if (t == null || t <= this.tick) { this.tickChanged = false; return; }
-        this.prevTick = this.tick;
-        this.tick = t;
-        this.tickChanged = true;
-        this.cycle = Math.floor(t / M.INCOME_INTERVAL);
-      } catch (e) { this.tickChanged = false; }
-    }
-  };
-
-  /* ================================================================
-   *  DENSITY ANALYZER
-   * ================================================================ */
-  var Density = {
-    limitingFactor: function () {
-      var d = API.density(API.myId);
-      if (d >= M.HARD_CAP_MULT) return 'HARD_CAP';
-      if (d >= M.PERFECT_DENSITY) return 'RED_ZONE';
-      if (d >= 90) return 'OPTIMAL';
-      if (d >= 70) return 'GOOD';
-      if (d >= 50) return 'LOW';
-      return 'CRITICAL';
-    },
-    optimalExpandPercent: function () {
-      var t = API.troops(API.myId);
-      var l = API.land(API.myId);
-      if (t <= 0 || l <= 0) return 0;
-      var ideal = l * M.PERFECT_DENSITY;
-      var excess = t - ideal;
-      if (excess <= 0) return 0.1;
-      var pct = (excess / t) * 100;
-      if (pct >= 50) {
-        var tax = Math.floor(M.ATTACK_TAX * t);
-        pct = Math.min(99, ((excess + tax) / t) * 100);
-      }
-      return Math.max(0.1, Math.min(99, pct));
-    },
-    predictedDensity: function (sentTroops, gainedLand) {
-      var t = API.troops(API.myId) - sentTroops;
-      var l = API.land(API.myId) + gainedLand;
-      return l > 0 ? t / l : 0;
-    }
-  };
-
-  /* ================================================================
-   *  BORDER INTELLIGENCE
-   * ================================================================ */
-  var Borders = {
-    _cache: null, _cacheTick: -1,
-
-    getEnemies: function () {
-      if (this._cacheTick === Cycle.tick && this._cache) return this._cache;
-      this._cacheTick = Cycle.tick;
-      var myId = API.myId;
-      if (myId == null) { this._cache = []; return this._cache; }
-      this._cache = [];
-      try {
-        var as = API.arraySize;
-        var myTiles = API.borderTiles(myId);
-        if (!myTiles || !myTiles.length) return this._cache;
-        var mySet = new Set(myTiles);
-        var nid = API.neutralId;
-
-        // Add neutral as enemy
-        if (API.land(nid) > 0 || myTiles.length > 0) {
-          this._cache.push({
-            id: nid, shared: myTiles.length, troops: API.troops(nid),
-            land: API.land(nid), density: API.density(nid), isNeutral: true
-          });
-        }
-
-        for (var pid = 0; pid < as; pid++) {
-          if (pid === myId) continue;
-          if (pid === nid) continue;
-          if (!API.land(pid) && !API.isAlive(pid)) continue;
-          var theirTiles = API.borderTiles(pid);
-          if (!theirTiles || !theirTiles.length) continue;
-          var shared = 0;
-          for (var i = 0; i < theirTiles.length && i < 500; i++) {
-            var c = theirTiles[i];
-            if (mySet.has(c - 1) || mySet.has(c + 1)) { shared++; continue; }
-            if (mySet.has(c - as) || mySet.has(c + as)) { shared++; }
-          }
-          if (shared > 0) {
-            this._cache.push({
-              id: pid, shared: shared, troops: API.troops(pid),
-              land: API.land(pid), density: API.density(pid), isNeutral: false
-            });
-          }
-        }
-      } catch (e) { /* */ }
-      return this._cache;
-    },
-
-    getThreats: function () {
-      var enemies = this.getEnemies();
-      var myTroops = API.troops(API.myId);
-      var myDensity = API.density(API.myId);
-      var myLand = API.land(API.myId);
-      var threats = [];
-      for (var i = 0; i < enemies.length; i++) {
-        var e = enemies[i];
-        if (e.isNeutral) continue;
-        var score = 0;
-        score += (e.troops / Math.max(1, myTroops)) * 30;
-        score += (e.density / Math.max(1, myDensity)) * 25;
-        score += (e.land / Math.max(1, myLand)) * 15;
-        score += (e.shared / Math.max(1, this.totalEnemyBorder())) * 10;
-        if (e.density < myDensity * 0.6) score -= 30;
-        threats.push({
-          id: e.id, shared: e.shared, troops: e.troops, land: e.land,
-          density: e.density, threat: score, isEasy: e.density < myDensity * 0.6
-        });
-      }
-      threats.sort(function (a, b) { return b.threat - a.threat; });
-      return threats;
-    },
-
-    totalEnemyBorder: function () {
-      var t = 0;
-      var enemies = this.getEnemies();
-      for (var i = 0; i < enemies.length; i++) {
-        if (!enemies[i].isNeutral) t += enemies[i].shared;
-      }
-      return t;
-    },
-
-    compactness: function () {
-      var l = API.land(API.myId);
-      return l > 0 ? API.borderCount(API.myId) / l : 0;
-    }
-  };
-
-  /* ================================================================
-   *  ATTACK PROTOCOL
-   * ================================================================ */
-  var p2v = function (p) {
-    return Math.max(0, Math.min(1023, Math.round(1023 * p / 100)));
-  };
-
-  function sendAttack(percent, targetId) {
-    try {
-      window.protocolHandler.gameCommandSender.attackTargetHandler(p2v(percent), targetId);
-      return true;
-    } catch (e) { return false; }
+  debug() {
+    const g = window.gameManager;
+    const p = window.playerData;
+    const m = window.mapData;
+    const l = window.gameLoop;
+    console.log('%c[ECHO] API Debug', 'color: #a855f7; font-weight: bold');
+    console.log('  gameManager:', !!g, g ? { ownId: g.OwnPlayerId, started: g.isGameStarted(), mode: g.gameMode, arraySize: g.arraySize } : null);
+    console.log('  playerData:', !!p, p ? { troopsLen: p.playerTroops?.length, landLen: p.landOwned?.length, tilesLen: p.playerTiles?.length } : null);
+    console.log('  mapData:', !!m, m ? { offsets: m.neighborOffsets, mapWidth: m.mapWidth } : null);
+    console.log('  protocolHandler:', !!window.protocolHandler);
+    console.log('  gameLoop:', !!l, l ? { tick: l.getTick() } : null);
+    console.log('  ECHO ready:', this.ready);
   }
-  function sendBoat(percent, targetId) {
-    try {
-      window.protocolHandler.gameCommandSender.sendBoatHandler(p2v(percent), targetId);
-      return true;
-    } catch (e) { return false; }
-  }
-  function cancelAttack(targetId) {
-    try { window.protocolHandler.gameCommandSender.cancelAttackHandler(targetId); } catch (e) { /* */ }
+};
+
+window.EchoAPI = EchoAPI;
+
+
+/* ================================================================
+ *  WINDOW MANAGER
+ * ================================================================ */
+var WindowManager = {
+  currentScreen: null,
+
+  openWindow: function (screenName) {
+    if (this.currentScreen && typeof this.currentScreen.hide === 'function') {
+      this.currentScreen.hide();
+    }
+    switch (screenName) {
+      case 'echoSettings':
+      case 'settings':
+        if (typeof echoSettings !== 'undefined') {
+          echoSettings.show();
+          this.currentScreen = echoSettings;
+        } else {
+          console.error('[ECHO] echoSettings is not loaded!');
+        }
+        break;
+    }
+  },
+
+  closeCurrent: function () {
+    if (this.currentScreen && typeof this.currentScreen.hide === 'function') {
+      this.currentScreen.hide();
+    }
+    this.currentScreen = null;
+  },
+};
+
+
+/* ================================================================
+ *  MOBILE FLOATING TOGGLE BUTTON
+ * ================================================================ */
+function createMobileToggle() {
+  if (document.getElementById('echo-mobile-toggle')) return;
+
+  const btn = document.createElement('div');
+  btn.id = 'echo-mobile-toggle';
+  btn.textContent = 'E';
+  btn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    echoSettings.toggle();
+  });
+  document.body.appendChild(btn);
+
+  /* Make the toggle button itself draggable via touch */
+  let dragging = false, ox = 0, oy = 0;
+  let moved = false;
+
+  btn.addEventListener('touchstart', (e) => {
+    const t = e.touches[0];
+    const r = btn.getBoundingClientRect();
+    ox = t.clientX - r.left;
+    oy = t.clientY - r.top;
+    dragging = true;
+    moved = false;
+  }, { passive: true });
+
+  btn.addEventListener('touchmove', (e) => {
+    if (!dragging) return;
+    e.preventDefault();
+    moved = true;
+    const t = e.touches[0];
+    let nx = t.clientX - ox;
+    let ny = t.clientY - oy;
+    /* Clamp to viewport */
+    nx = Math.max(0, Math.min(window.innerWidth - 44, nx));
+    ny = Math.max(0, Math.min(window.innerHeight - 44, ny));
+    btn.style.left = nx + 'px';
+    btn.style.top = ny + 'px';
+    btn.style.right = 'auto';
+    btn.style.bottom = 'auto';
+  }, { passive: false });
+
+  btn.addEventListener('touchend', (e) => {
+    dragging = false;
+    /* If finger didn't move much, treat as tap (toggle handled by click) */
+    if (moved) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  });
+}
+
+
+/* ================================================================
+ *  ECHO SETTINGS GUI
+ * ================================================================ */
+function EchoSettings() {
+  if (!document.getElementById('echo-font')) {
+    const link = document.createElement('link');
+    link.id = 'echo-font';
+    link.rel = 'stylesheet';
+    link.href =
+      'https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Inter:wght@400;500&display=swap';
+    document.head.appendChild(link);
   }
 
-  /* ================================================================
-   *  BOT BRAIN
-   * ================================================================ */
-  var Bot = {
-    state: 'init',
-    stats: { attacks: 0, expansions: 0, retreats: 0, boats: 0, kills: 0 },
-    lastAttackTick: {},
-    activeTargets: {},
-    lastBalance: 0,
-    balanceDrops: [],
-    underAttack: false,
-    openingDone: false,
-
-    canAfford: function (percent) {
-      var troops = API.troops(API.myId);
-      var land = API.land(API.myId);
-      var remaining = troops * (1 - percent / 100);
-      return land > 0 ? (remaining / land) >= 40 : remaining > 500;
-    },
-
-    perfectAttackPercent: function () {
-      var troops = API.troops(API.myId);
-      var land = API.land(API.myId);
-      if (troops <= 0 || land <= 0) return 0;
-      var idealTroops = land * M.PERFECT_DENSITY;
-      var excess = troops - idealTroops;
-      if (excess <= 0) return 0.1;
-      var pct = (excess / troops) * 100;
-      if (pct >= 50) {
-        var tax = Math.floor(M.ATTACK_TAX * troops);
-        pct = Math.min(99, ((excess + tax) / troops) * 100);
-      }
-      return Math.max(0.1, Math.min(99, pct));
-    },
-
-    killPercent: function (enemy) {
-      var myTroops = API.troops(API.myId);
-      var myLand = API.land(API.myId);
-      if (myTroops <= 0 || enemy.land <= 0) return 0;
-      var needed = enemy.troops * 2 + enemy.land * 50;
-      var withTax = needed / (1 - M.ATTACK_TAX);
-      var pct = (withTax / myTroops) * 100;
-      var remaining = myTroops * (1 - pct / 100);
-      if (myLand > 0 && (remaining / myLand) < 40) pct = this.maxSafePercent();
-      return Math.max(1, Math.min(99, Math.round(pct)));
-    },
-
-    maxSafePercent: function () {
-      var troops = API.troops(API.myId);
-      var land = API.land(API.myId);
-      if (land <= 0 || troops <= 0) return 0;
-      var minTroops = land * 40;
-      var maxSend = troops - minTroops;
-      return maxSend > 0 ? Math.min(99, (maxSend / troops) * 100) : 0;
-    },
-
-    execute: function (percent, targetId) {
-      if (percent <= 0) return false;
-      if (!this.canAfford(percent)) return false;
-      var last = this.lastAttackTick[targetId] || -100;
-      if (Cycle.tick - last < 1) return false;
-      var ok = sendAttack(percent, targetId);
-      if (ok) {
-        this.lastAttackTick[targetId] = Cycle.tick;
-        this.activeTargets[targetId] = true;
-        this.stats.attacks++;
-        return true;
-      }
-      return false;
-    },
-
-    detectIncoming: function () {
-      var troops = API.troops(API.myId);
-      this.balanceDrops.push({ tick: Cycle.tick, troops: troops });
-      if (this.balanceDrops.length > 5) this.balanceDrops.shift();
-      if (this.balanceDrops.length >= 2) {
-        var prev = this.balanceDrops[this.balanceDrops.length - 2];
-        var curr = this.balanceDrops[this.balanceDrops.length - 1];
-        var drop = prev.troops - curr.troops;
-        var activeCount = Object.keys(this.activeTargets).length;
-        var expectedTax = activeCount * (troops * M.ATTACK_TAX);
-        this.underAttack = drop > expectedTax + troops * 0.03;
-      }
-    },
-
-    prioritizeRetreat: function () {
-      if (!this.underAttack) return;
-      if (API.density(API.myId) >= M.PERFECT_DENSITY) return;
-      var threats = Borders.getThreats();
-      var ids = Object.keys(this.activeTargets);
-      for (var i = 0; i < ids.length; i++) {
-        var tid = parseInt(ids[i]);
-        for (var j = 0; j < threats.length; j++) {
-          if (threats[j].id === tid && threats[j].threat > 30) {
-            cancelAttack(tid);
-            delete this.activeTargets[tid];
-            this.stats.retreats++;
-            break;
-          }
-        }
-      }
+  const style = document.createElement('style');
+  style.id = 'echo-gui-style';
+  style.innerHTML = `
+    :root {
+      --eg-bg:       #0d0b14;
+      --eg-surface:  #13101e;
+      --eg-border:   #2a1f4a;
+      --eg-accent:   #7c3aed;
+      --eg-accent2:  #a855f7;
+      --eg-text:     #c4b5fd;
+      --eg-muted:    #6d5d8a;
+      --eg-toggle-off: #2e2040;
     }
-  };
 
-  /* ================================================================
-   *  OPENING ENGINE
-   * ================================================================ */
-  var Opening = {
-    moves: null,
-    executed: {},
+    #echo-gui * { box-sizing: border-box; margin: 0; padding: 0; }
 
-    build: function () {
-      var nid = API.neutralId;
-      this.moves = [
-        { tick: 10,  pct: 50,   target: nid },
-        { tick: 25,  pct: 0.1,  target: nid },
-        { tick: 40,  pct: 45,   target: nid },
-        { tick: 55,  pct: 0.1,  target: nid },
-        { tick: 70,  pct: 40,   target: nid },
-        { tick: 85,  pct: 0.1,  target: nid },
-        { tick: 100, pct: 35,   target: nid },
-        { tick: 120, pct: 0.1,  target: nid },
-        { tick: 140, pct: 30,   target: nid },
-        { tick: 160, pct: 0.1,  target: nid },
-        { tick: 180, pct: 25,   target: nid },
-        { tick: 200, pct: 0.1,  target: nid },
-        { tick: 220, pct: 20,   target: nid },
-        { tick: 250, pct: 0.1,  target: nid },
-        { tick: 270, pct: 15,   target: nid },
-        { tick: 300, pct: 0.1,  target: nid },
-        { tick: 330, pct: 10,   target: nid },
-        { tick: 360, pct: 0.1,  target: nid },
-        { tick: 400, pct: 8,    target: nid },
-        { tick: 450, pct: 0.1,  target: nid },
-        { tick: 500, pct: 5,    target: nid }
-      ];
-      Bot.openingDone = false;
-      this.executed = {};
-    },
-
-    processTick: function () {
-      if (Bot.openingDone || !this.moves) return;
-      for (var i = 0; i < this.moves.length; i++) {
-        var move = this.moves[i];
-        if (move.tick === Cycle.tick && !this.executed[move.tick]) {
-          this.executed[move.tick] = true;
-          sendAttack(move.pct, move.target);
-          Bot.stats.expansions++;
-        }
-      }
-      if (Cycle.tick > 550) Bot.openingDone = true;
+    #echo-gui {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 280px;
+      max-width: calc(100vw - 16px);
+      max-height: calc(100vh - 80px);
+      background: var(--eg-bg);
+      border: 1px solid var(--eg-border);
+      border-radius: 10px;
+      color: var(--eg-text);
+      font-family: 'Inter', sans-serif;
+      font-size: 13px;
+      box-shadow: 0 0 0 1px #7c3aed22, 0 8px 32px #0007, inset 0 1px 0 #ffffff08;
+      display: none;
+      z-index: 999999;
+      user-select: none;
+      -webkit-user-select: none;
+      overflow: hidden;
+      touch-action: none;
+      -webkit-touch-callout: none;
     }
-  };
 
-  /* ================================================================
-   *  EXPANSION ENGINE â€” density-perfect
-   * ================================================================ */
-  var Expansion = {
-    processTick: function () {
-      if (Bot.openingDone === false) return;
-      if (Bot.underAttack && API.density(API.myId) < 80) return;
-      var tick = Cycle.tick;
-      var myDensity = API.density(API.myId);
-      var myLand = API.land(API.myId);
-      var myTroops = API.troops(API.myId);
-      if (myTroops <= 0 || myLand <= 0) return;
-      if (myDensity >= M.HARD_CAP_MULT) return;
-      var nid = API.neutralId;
-
-      if (Phase.isDefense) {
-        if (tick % 2 === 0) {
-          if (myDensity > M.PERFECT_DENSITY) {
-            var pct = Bot.perfectAttackPercent();
-            if (pct > 0.1) Bot.execute(pct, nid);
-          } else {
-            Bot.execute(0.1, nid);
-          }
-        }
-        return;
-      }
-
-      if (Income.isPreIncomeTick(tick)) {
-        var pct = Bot.perfectAttackPercent();
-        if (pct >= 0.1) { Bot.execute(pct, nid); Bot.stats.expansions++; return; }
-      }
-      if (Income.isIncomeTick(tick)) return;
-
-      if (myDensity > M.PERFECT_DENSITY) {
-        var pct = Bot.perfectAttackPercent();
-        if (pct >= 1) { Bot.execute(pct, nid); Bot.stats.expansions++; }
-        return;
-      }
-
-      if (tick % 3 === 0 && myDensity > 90) {
-        var pct = Bot.perfectAttackPercent();
-        if (pct >= 0.5) { Bot.execute(pct, nid); Bot.stats.expansions++; }
-      }
+    #eg-titlebar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      background: var(--eg-surface);
+      border-bottom: 1px solid var(--eg-border);
+      cursor: move;
+      touch-action: none;
+      min-height: 44px;
     }
-  };
 
-  /* ================================================================
-   *  COMBAT ENGINE
-   * ================================================================ */
-  var Combat = {
-    processTick: function () {
-      if (Bot.openingDone === false) return;
-      if (Bot.underAttack && API.density(API.myId) < 60) return;
-      var enemies = Borders.getEnemies();
-      var targets = [];
-      for (var i = 0; i < enemies.length; i++) {
-        var e = enemies[i];
-        if (e.isNeutral) continue;
-        if (e.land <= 0 || e.troops <= 0) continue;
-        targets.push(e);
-      }
-      if (!targets.length) return;
-
-      // Clean dead
-      var ids = Object.keys(Bot.activeTargets);
-      for (var i = 0; i < ids.length; i++) {
-        var tid = parseInt(ids[i]);
-        if (!API.land(tid)) { delete Bot.activeTargets[tid]; Bot.stats.kills++; }
-      }
-
-      var myDensity = API.density(API.myId);
-      if (myDensity < 50) return;
-
-      targets.sort(function (a, b) { return a.density - b.density; });
-      var tickInCycle = Cycle.tick % M.INCOME_INTERVAL;
-      if (tickInCycle !== 5 && tickInCycle !== 6) return;
-
-      var maxTargets = Math.min(targets.length, 3);
-      var budget = Bot.maxSafePercent();
-      var used = 0;
-      for (var i = 0; i < maxTargets; i++) {
-        var enemy = targets[i];
-        if (used + 5 > budget) break;
-        var pct;
-        if (enemy.density < myDensity * 0.5) {
-          pct = Math.min(Bot.killPercent(enemy), budget - used);
-        } else if (enemy.density < myDensity * 0.8) {
-          var ratio = myDensity / Math.max(1, enemy.density);
-          pct = Math.max(3, Math.min(25, 15 / ratio));
-        } else { pct = 3; }
-        pct = Math.min(pct, budget - used);
-        if (pct >= 1 && Bot.execute(pct, enemy.id)) used += pct;
-      }
+    #eg-logo {
+      font-family: 'Rajdhani', sans-serif;
+      font-weight: 700;
+      font-size: 15px;
+      letter-spacing: 2px;
+      color: var(--eg-accent2);
+      text-shadow: 0 0 12px #a855f766;
+      pointer-events: none;
     }
-  };
 
-  /* ================================================================
-   *  DEFENSE ENGINE
-   * ================================================================ */
-  var Defense = {
-    hoardMode: false,
-    processTick: function () {
-      if (Bot.underAttack) {
-        this.hoardMode = true;
-        return;
-      }
-      // Auto-hoard when density is critically low
-      if (API.density(API.myId) < 40) {
-        this.hoardMode = true;
-      } else if (API.density(API.myId) > 60) {
-        this.hoardMode = false;
-      }
+    #eg-close {
+      width: 32px;
+      height: 32px;
+      background: #3b2060;
+      border: none;
+      border-radius: 6px;
+      color: var(--eg-text);
+      cursor: pointer;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      line-height: 1;
+      transition: background .15s;
+      min-width: 44px;
+      min-height: 44px;
+      -webkit-tap-highlight-color: transparent;
     }
-  };
+    #eg-close:hover { background: var(--eg-accent); color: #fff; }
+    #eg-close:active { background: var(--eg-accent); color: #fff; transform: scale(0.95); }
 
-  /* ================================================================
-   *  SPEEDBOOST ENGINE â€” always-on, automatic
-   * ================================================================ */
-  var SpeedBoost = {
-    active: false,
-    processTick: function () {
-      // Auto-activate speedboost when:
-      // - BLITZ or FAST phase (cheap conquest)
-      // - Density above optimal (need to dump troops)
-      // - Enemy is weaker (can afford to be aggressive)
-      var myDensity = API.density(API.myId);
-      var myTroops = API.troops(API.myId);
-      var myLand = API.land(API.myId);
-      if (myTroops <= 0 || myLand <= 0) { this.active = false; return; }
-
-      var shouldBoost = false;
-      // Boost during early phases when conquest is cheap
-      if (Phase.name === 'BLITZ' || Phase.name === 'FAST') shouldBoost = true;
-      // Boost when over-dense (wasting interest)
-      if (myDensity > M.PERFECT_DENSITY * 1.1) shouldBoost = true;
-      // Boost when no threats and density is good
-      if (myDensity > 90 && !Bot.underAttack) shouldBoost = true;
-      // NEVER boost when under attack and low density
-      if (Bot.underAttack && myDensity < 80) shouldBoost = false;
-      // NEVER boost in defense phase
-      if (Phase.isDefense) shouldBoost = false;
-
-      this.active = shouldBoost;
-    },
-
-    getAttackMultiplier: function () {
-      return this.active ? 1.5 : 1.0;
+    #eg-tabs {
+      display: flex;
+      background: var(--eg-surface);
+      border-bottom: 1px solid var(--eg-border);
     }
-  };
 
-  /* ================================================================
-   *  BOAT ENGINE
-   * ================================================================ */
-  var Boats = {
-    lastTick: -100,
-    processTick: function () {
-      if (Bot.openingDone === false) return;
-      if (Cycle.tick - this.lastTick < 30) return;
-      if (API.density(API.myId) < 80) return;
-      var enemies = Borders.getEnemies();
-      var myDensity = API.density(API.myId);
-      for (var i = 0; i < enemies.length; i++) {
-        var e = enemies[i];
-        if (e.isNeutral) continue;
-        if (e.density >= myDensity * 0.7) continue;
-        var pct = Math.max(3, Math.min(8, Math.round(
-          (1 - e.density / Math.max(1, myDensity)) * 10
-        )));
-        if (Bot.canAfford(pct) && API.troops(API.myId) * pct / 100 >= 60) {
-          if (sendBoat(pct, e.id)) {
-            this.lastTick = Cycle.tick;
-            Bot.stats.boats++;
-            return;
-          }
-        }
-      }
+    .eg-tab {
+      flex: 1;
+      padding: 10px 0;
+      text-align: center;
+      font-family: 'Rajdhani', sans-serif;
+      font-weight: 600;
+      font-size: 12px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: var(--eg-muted);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: color .15s, border-color .15s;
+      -webkit-tap-highlight-color: transparent;
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
-  };
-
-  /* ================================================================
-   *  ALLIANCE ENGINE
-   * ================================================================ */
-  var Alliance = {
-    allies: {},
-    addAlly: function (id) { this.allies[id] = true; },
-    removeAlly: function (id) { delete this.allies[id]; },
-    isAlly: function (id) { return !!this.allies[id]; },
-    processTick: function () {
-      // Clean dead allies
-      var ids = Object.keys(this.allies);
-      for (var i = 0; i < ids.length; i++) {
-        if (!API.land(parseInt(ids[i]))) delete this.allies[ids[i]];
-      }
+    .eg-tab:hover { color: var(--eg-text); }
+    .eg-tab:active { color: var(--eg-text); }
+    .eg-tab.active {
+      color: var(--eg-accent2);
+      border-bottom: 2px solid var(--eg-accent);
     }
-  };
 
-  /* ================================================================
-   *  SETTINGS â€” user-configurable (via GUI or console)
-   * ================================================================ */
-  var Settings = {
-    expansionEnabled: true,
-    combatEnabled: true,
-    boatsEnabled: true,
-    defenseEnabled: true,
-    speedBoostEnabled: true,
-    allianceEnabled: true,
-    autoOpening: true,
-    targetDensity: 100,
-    minAttackDensity: 50,
-    maxConcurrentAttacks: 3,
-    boatCooldown: 30,
-    retreatThreshold: 30
-  };
-
-  /* ================================================================
-   *  GUI â€” full overlay with tabs and controls
-   * ================================================================ */
-  var GUI = {
-    el: null,
-    visible: true,
-    activeTab: 0,
-    tabs: ['Status', 'Engine', 'Config'],
-    counter: 0,
-
-    create: function () {
-      if (document.getElementById('m5-panel')) return;
-      try {
-        var style = document.createElement('style');
-        style.id = 'm5-css';
-        style.textContent =
-          '#m5-panel{position:fixed;top:8px;left:8px;width:220px;background:rgba(10,8,18,.94);border:1px solid #2a1f4a;border-radius:10px;color:#e2e8f0;font:11px/1.5 system-ui,sans-serif;z-index:999999;user-select:none;-webkit-user-select:none;overflow:hidden}' +
-          '#m5-header{display:flex;align-items:center;justify-content:space-between;padding:6px 10px;background:rgba(245,158,11,.12);border-bottom:1px solid #2a1f4a;cursor:move;touch-action:none}' +
-          '#m5-header b{color:#fbbf24;font-size:12px;letter-spacing:1px}' +
-          '#m5-tabs{display:flex;border-bottom:1px solid #2a1f4a}' +
-          '.m5-tab{flex:1;padding:4px 0;text-align:center;font-size:10px;color:#6b7280;cursor:pointer;border-bottom:2px solid transparent;transition:all .15s}' +
-          '.m5-tab:hover{color:#fbbf24}' +
-          '.m5-tab.active{color:#fbbf24;border-bottom-color:#f59e0b}' +
-          '#m5-body{padding:6px 10px;max-height:400px;overflow-y:auto}' +
-          '.m5-row{display:flex;justify-content:space-between;padding:1px 0}' +
-          '.m5-row span:first-child{color:#94a3b8}' +
-          '.m5-val{color:#fbbf24;font-weight:600;text-align:right}' +
-          '.m5-phase{display:inline-block;padding:0 5px;border-radius:3px;font-size:9px;font-weight:700;letter-spacing:1px}' +
-          '.m5-phase.BLITZ{background:#ef444444;color:#ef4444}' +
-          '.m5-phase.FAST{background:#f9731644;color:#f97316}' +
-          '.m5-phase.MEDIUM{background:#eab30844;color:#eab308}' +
-          '.m5-phase.SLOW{background:#22c55e44;color:#22c55e}' +
-          '.m5-phase.V.SLOW{background:#3b82f644;color:#3b82f6}' +
-          '.m5-phase.DEFENSE{background:#a855f744;color:#a855f7}' +
-          '.m5-phase.IDLE{color:#6b7280}' +
-          '.m5-on{color:#22c55e}' +
-          '.m5-off{color:#ef4444}' +
-          '.m5-engine{display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid #1e1b2e}' +
-          '.m5-engine span{color:#cbd5e1;font-size:10px}' +
-          '.m5-sw{width:32px;height:18px;background:#374151;border-radius:9px;position:relative;cursor:pointer;transition:background .2s}' +
-          '.m5-sw.on{background:#f59e0b}' +
-          '.m5-sw::after{content:\"\";position:absolute;top:2px;left:2px;width:14px;height:14px;background:#fff;border-radius:50%;transition:transform .2s}' +
-          '.m5-sw.on::after{transform:translateX(14px)}' +
-          '.m5-cfg{padding:3px 0}' +
-          '.m5-cfg label{display:flex;justify-content:space-between;color:#94a3b8;font-size:10px;margin-bottom:2px}' +
-          '.m5-cfg input{width:50px;background:#1e1b2e;border:1px solid #374151;color:#fbbf24;border-radius:4px;padding:2px 4px;font-size:10px;text-align:right}' +
-          '.m5-cfg input:focus{outline:none;border-color:#f59e0b}' +
-          '#m5-toggle{position:fixed;bottom:16px;right:16px;width:40px;height:40px;background:linear-gradient(135deg,#f59e0b,#fbbf24);border:2px solid #f59e0b66;border-radius:10px;color:#000;font:700 14px/1 system-ui;display:flex;align-items:center;justify-content:center;z-index:999998;cursor:pointer;box-shadow:0 2px 12px #f59e0b88;touch-action:none}' +
-          '#m5-toggle:active{transform:scale(.92)}';
-        document.head.appendChild(style);
-
-        var panel = document.createElement('div');
-        panel.id = 'm5-panel';
-        panel.innerHTML =
-          '<div id="m5-header"><b>MESSIAH v5</b><span style="font-size:10px;color:#6b7280">&#9776;</span></div>' +
-          '<div id="m5-tabs"><div class="m5-tab active" data-tab="0">Status</div><div class="m5-tab" data-tab="1">Engine</div><div class="m5-tab" data-tab="2">Config</div></div>' +
-          '<div id="m5-body"></div>';
-        document.body.appendChild(panel);
-        this.el = panel;
-
-        // Tab clicks
-        var tabs = panel.querySelectorAll('.m5-tab');
-        var self = this;
-        for (var i = 0; i < tabs.length; i++) {
-          (function (idx) {
-            tabs[idx].addEventListener('click', function (e) {
-              e.preventDefault(); e.stopPropagation();
-              self.activeTab = idx;
-              for (var j = 0; j < tabs.length; j++) tabs[j].classList.toggle('active', j === idx);
-              self.renderBody();
-            });
-          })(i);
-        }
-
-        // Draggable header
-        var header = panel.querySelector('#m5-header');
-        var dragging = false, ox = 0, oy = 0;
-        header.addEventListener('mousedown', function (e) {
-          dragging = true; ox = e.clientX - panel.offsetLeft; oy = e.clientY - panel.offsetTop;
-          e.preventDefault();
-        });
-        document.addEventListener('mousemove', function (e) {
-          if (!dragging) return;
-          panel.style.left = Math.max(0, e.clientX - ox) + 'px';
-          panel.style.top = Math.max(0, e.clientY - oy) + 'px';
-        });
-        document.addEventListener('mouseup', function () { dragging = false; });
-        header.addEventListener('touchstart', function (e) {
-          var t = e.touches[0]; ox = t.clientX - panel.offsetLeft; oy = t.clientY - panel.offsetTop; dragging = true;
-        }, { passive: true });
-        header.addEventListener('touchmove', function (e) {
-          if (!dragging) return; e.preventDefault();
-          var t = e.touches[0];
-          panel.style.left = Math.max(0, Math.min(innerWidth - 220, t.clientX - ox)) + 'px';
-          panel.style.top = Math.max(0, Math.min(innerHeight - 100, t.clientY - oy)) + 'px';
-        }, { passive: false });
-        header.addEventListener('touchend', function () { dragging = false; });
-
-        // Toggle button
-        var btn = document.createElement('div');
-        btn.id = 'm5-toggle';
-        btn.textContent = 'M';
-        btn.addEventListener('click', function (e) {
-          e.preventDefault(); e.stopPropagation();
-          self.visible = !self.visible;
-          panel.style.display = self.visible ? 'block' : 'none';
-        });
-        document.body.appendChild(btn);
-
-        // Make toggle draggable on mobile
-        var bdrag = false, box = 0, boy = 0;
-        btn.addEventListener('touchstart', function (e) {
-          var t = e.touches[0]; var r = btn.getBoundingClientRect();
-          box = t.clientX - r.left; boy = t.clientY - r.top; bdrag = true;
-        }, { passive: true });
-        btn.addEventListener('touchmove', function (e) {
-          if (!bdrag) return; e.preventDefault();
-          var t = e.touches[0];
-          btn.style.left = Math.max(0, Math.min(innerWidth - 40, t.clientX - box)) + 'px';
-          btn.style.top = Math.max(0, Math.min(innerHeight - 40, t.clientY - boy)) + 'px';
-          btn.style.right = 'auto'; btn.style.bottom = 'auto';
-        }, { passive: false });
-        btn.addEventListener('touchend', function () { bdrag = false; });
-
-        this.renderBody();
-      } catch (e) { /* GUI failed, bot still works */ }
-    },
-
-    renderBody: function () {
-      if (!this.el) return;
-      try {
-        var body = this.el.querySelector('#m5-body');
-        if (!body) return;
-        if (this.activeTab === 0) body.innerHTML = this.statusHTML();
-        else if (this.activeTab === 1) body.innerHTML = this.engineHTML();
-        else body.innerHTML = this.configHTML();
-        this.bindEvents(body);
-      } catch (e) { /* */ }
-    },
-
-    statusHTML: function () {
-      var fmt = function (n) {
-        if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
-        if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
-        return Math.round(n) + '';
-      };
-      var myD = API.density(API.myId);
-      var df = Density.limitingFactor();
-      var dfColor = df === 'HARD_CAP' || df === 'RED_ZONE' ? '#ef4444' : df === 'OPTIMAL' ? '#22c55e' : '#eab308';
-      return
-        '<div class="m5-row"><span>Phase</span><span><span class="m5-phase ' + Phase.name + '">' + Phase.name + '</span></span></div>' +
-        '<div class="m5-row"><span>Tick</span><span class="m5-val">' + Cycle.tick + '</span></div>' +
-        '<div class="m5-row"><span>Troops</span><span class="m5-val">' + fmt(API.troops(API.myId)) + '</span></div>' +
-        '<div class="m5-row"><span>Land</span><span class="m5-val">' + fmt(API.land(API.myId)) + '</span></div>' +
-        '<div class="m5-row"><span>Density</span><span class="m5-val">' + myD.toFixed(1) + '</span></div>' +
-        '<div class="m5-row"><span>Factor</span><span style="color:' + dfColor + ';font-weight:600;font-size:10px">' + df + '</span></div>' +
-        '<div class="m5-row"><span>Income</span><span class="m5-val">' + Income.getMyRate() + '</span></div>' +
-        '<div class="m5-row"><span>Next Income</span><span class="m5-val">' + Income.ticksUntilIncome() + 't</span></div>' +
-        '<div class="m5-row"><span>Boost</span><span class="m5-val ' + (SpeedBoost.active ? 'm5-on' : 'm5-off') + '">' + (SpeedBoost.active ? 'ON' : 'OFF') + '</span></div>' +
-        '<div class="m5-row"><span>Under Atk</span><span class="m5-val ' + (Bot.underAttack ? 'm5-on' : 'm5-off') + '">' + (Bot.underAttack ? 'YES' : 'no') + '</span></div>' +
-        '<div class="m5-row"><span>Enemies</span><span class="m5-val">' + Borders.getEnemies().length + '</span></div>' +
-        '<div class="m5-row"><span>Atk/Exp/Kill</span><span class="m5-val">' + Bot.stats.attacks + '/' + Bot.stats.expansions + '/' + Bot.stats.kills + '</span></div>' +
-        '<div class="m5-row"><span>Boats/Retreat</span><span class="m5-val">' + Bot.stats.boats + '/' + Bot.stats.retreats + '</span></div>' +
-        '<div class="m5-row"><span>Compact</span><span class="m5-val">' + (Borders.compactness() * 100).toFixed(2) + '%</span></div>';
-    },
-
-    engineHTML: function () {
-      var engines = [
-        { name: 'Expansion', key: 'expansionEnabled' },
-        { name: 'Combat', key: 'combatEnabled' },
-        { name: 'Boats', key: 'boatsEnabled' },
-        { name: 'Defense', key: 'defenseEnabled' },
-        { name: 'SpeedBoost', key: 'speedBoostEnabled' },
-        { name: 'Alliance', key: 'allianceEnabled' },
-        { name: 'Auto Opening', key: 'autoOpening' }
-      ];
-      var html = '';
-      for (var i = 0; i < engines.length; i++) {
-        var e = engines[i];
-        var on = Settings[e.key];
-        html += '<div class="m5-engine"><span>' + e.name + '</span><div class="m5-sw ' + (on ? 'on' : '') + '" data-key="' + e.key + '"></div></div>';
-      }
-      return html;
-    },
-
-    configHTML: function () {
-      return
-        '<div class="m5-cfg"><label>Target Density<span><input type="number" data-key="targetDensity" value="' + Settings.targetDensity + '" min="50" max="150"></span></label></div>' +
-        '<div class="m5-cfg"><label>Min Atk Density<span><input type="number" data-key="minAttackDensity" value="' + Settings.minAttackDensity + '" min="20" max="100"></span></label></div>' +
-        '<div class="m5-cfg"><label>Max Atk Targets<span><input type="number" data-key="maxConcurrentAttacks" value="' + Settings.maxConcurrentAttacks + '" min="1" max="8"></span></label></div>' +
-        '<div class="m5-cfg"><label>Boat Cooldown (t)<span><input type="number" data-key="boatCooldown" value="' + Settings.boatCooldown + '" min="5" max="100"></span></label></div>' +
-        '<div class="m5-cfg"><label>Retreat Threat<span><input type="number" data-key="retreatThreshold" value="' + Settings.retreatThreshold + '" min="10" max="80"></span></label></div>';
-    },
-
-    bindEvents: function (body) {
-      if (this.activeTab === 1) {
-        var switches = body.querySelectorAll('.m5-sw');
-        var self = this;
-        for (var i = 0; i < switches.length; i++) {
-          (function (sw) {
-            sw.addEventListener('click', function (e) {
-              e.preventDefault(); e.stopPropagation();
-              var key = sw.getAttribute('data-key');
-              Settings[key] = !Settings[key];
-              sw.classList.toggle('on', Settings[key]);
-            });
-          })(switches[i]);
-        }
-      } else if (this.activeTab === 2) {
-        var inputs = body.querySelectorAll('input');
-        for (var i = 0; i < inputs.length; i++) {
-          (function (inp) {
-            inp.addEventListener('change', function (e) {
-              e.preventDefault(); e.stopPropagation();
-              var key = inp.getAttribute('data-key');
-              var val = parseFloat(inp.value);
-              if (!isNaN(val)) Settings[key] = val;
-            });
-          })(inputs[i]);
-        }
-      }
-    },
-
-    update: function () {
-      if (!this.el || !this.visible) return;
-      this.counter++;
-      if (this.counter < 5) return;
-      this.counter = 0;
-      this.renderBody();
+    #eg-content {
+      padding: 10px 14px 14px;
+      overflow-y: auto;
+      max-height: calc(100vh - 180px);
+      -webkit-overflow-scrolling: touch;
     }
-  };
 
-  /* ================================================================
-   *  MAIN LOOP
-   * ================================================================ */
-  var wasInGame = false;
+    .eg-panel { display: none; }
+    .eg-panel.active { display: block; }
 
-  function resetState() {
-    Cycle.tick = -1; Cycle.prevTick = -1; Cycle.tickChanged = false;
-    Bot.state = 'init';
-    Bot.stats = { attacks: 0, expansions: 0, retreats: 0, boats: 0, kills: 0 };
-    Bot.lastAttackTick = {};
-    Bot.activeTargets = {};
-    Bot.underAttack = false;
-    Bot.balanceDrops = [];
-    Bot.openingDone = false;
-    Opening.moves = null; Opening.executed = {};
-    SpeedBoost.active = false;
-    Defense.hoardMode = false;
-    Boats.lastTick = -100;
-    Borders._cacheTick = -1; Borders._cache = null;
-    Alliance.allies = {};
-    wasInGame = false;
+    .eg-section {
+      font-family: 'Rajdhani', sans-serif;
+      font-weight: 700;
+      font-size: 10px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: var(--eg-accent);
+      margin: 10px 0 6px;
+      padding-bottom: 3px;
+      border-bottom: 1px solid var(--eg-border);
+    }
+    .eg-section:first-child { margin-top: 2px; }
+
+    .eg-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 0;
+      min-height: 44px;
+    }
+
+    .eg-label {
+      font-size: 13px;
+      color: #d8caff;
+      font-weight: 400;
+    }
+
+    .eg-toggle-wrap {
+      position: relative;
+      width: 44px;
+      height: 26px;
+      flex-shrink: 0;
+    }
+    .eg-toggle-wrap input {
+      opacity: 0;
+      width: 0; height: 0;
+      position: absolute;
+    }
+    .eg-toggle-track {
+      position: absolute;
+      inset: 0;
+      background: var(--eg-toggle-off);
+      border-radius: 26px;
+      cursor: pointer;
+      transition: background .2s;
+      border: 1px solid #3d2d5e;
+    }
+    .eg-toggle-track::after {
+      content: '';
+      position: absolute;
+      width: 20px;
+      height: 20px;
+      top: 2px;
+      left: 2px;
+      background: var(--eg-muted);
+      border-radius: 50%;
+      transition: transform .2s, background .2s;
+    }
+    .eg-toggle-wrap input:checked + .eg-toggle-track {
+      background: var(--eg-accent);
+      border-color: var(--eg-accent);
+    }
+    .eg-toggle-wrap input:checked + .eg-toggle-track::after {
+      transform: translateX(18px);
+      background: #fff;
+    }
+
+    .eg-slider-wrap {
+      display: flex;
+      flex-direction: column;
+      padding: 6px 0 8px;
+      gap: 6px;
+    }
+    .eg-slider-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .eg-slider-val {
+      font-family: 'Rajdhani', sans-serif;
+      font-weight: 600;
+      font-size: 12px;
+      color: var(--eg-accent2);
+    }
+    .eg-slider {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 4px;
+      border-radius: 4px;
+      background: var(--eg-border);
+      outline: none;
+      cursor: pointer;
+    }
+    .eg-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: var(--eg-accent2);
+      cursor: pointer;
+      box-shadow: 0 0 6px #a855f766;
+    }
+    .eg-slider::-moz-range-thumb {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: var(--eg-accent2);
+      cursor: pointer;
+      border: none;
+    }
+    .eg-slider:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+    .eg-slider:disabled::-webkit-slider-thumb { cursor: not-allowed; }
+
+    .eg-btn-row {
+      display: flex;
+      gap: 8px;
+      padding: 8px 0 4px;
+      margin-top: 14px;
+    }
+    .eg-btn {
+      flex: 1;
+      padding: 12px 0;
+      border: 1px solid var(--eg-border);
+      border-radius: 6px;
+      background: var(--eg-surface);
+      color: var(--eg-text);
+      font-family: 'Rajdhani', sans-serif;
+      font-weight: 600;
+      font-size: 12px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .eg-btn:hover { background: var(--eg-border); }
+    .eg-btn:active { background: var(--eg-border); transform: scale(0.97); }
+    .eg-btn.active {
+      background: var(--eg-accent);
+      border-color: var(--eg-accent);
+      color: #fff;
+    }
+
+    .eg-status {
+      font-family: 'Rajdhani', sans-serif;
+      font-size: 11px;
+      letter-spacing: 1px;
+      text-align: center;
+      padding: 4px 0 0;
+      color: var(--eg-muted);
+    }
+    .eg-status.on  { color: #4CAF50; }
+    .eg-status.off { color: #f44336; }
+
+    /* Mobile floating toggle button */
+    #echo-mobile-toggle {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      width: 44px;
+      height: 44px;
+      background: linear-gradient(135deg, #7c3aed, #a855f7);
+      border: 2px solid #a855f766;
+      border-radius: 12px;
+      color: #fff;
+      font-family: 'Rajdhani', sans-serif;
+      font-weight: 700;
+      font-size: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 999998;
+      cursor: pointer;
+      box-shadow: 0 2px 12px #7c3aed88, 0 0 20px #a855f733;
+      touch-action: none;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+      -webkit-user-select: none;
+      transition: transform 0.1s;
+    }
+    #echo-mobile-toggle:active {
+      transform: scale(0.92);
+    }
+  `;
+  if (!document.getElementById('echo-gui-style')) {
+    document.head.appendChild(style);
   }
 
-  function mainLoop() {
-    try {
-      if (!API.check()) { requestAnimationFrame(mainLoop); return; }
+  const toggle = (label, id) => `
+    <div class="eg-row">
+      <span class="eg-label">${label}</span>
+      <label class="eg-toggle-wrap">
+        <input type="checkbox" id="${id}">
+        <span class="eg-toggle-track"></span>
+      </label>
+    </div>`;
 
-      var on = API.gameStarted();
-      if (!on) {
-        if (wasInGame) resetState();
-        wasInGame = false;
-        requestAnimationFrame(mainLoop);
-        return;
-      }
+  const slider = (label, id, min, max, val, unit) => `
+    <div class="eg-slider-wrap">
+      <div class="eg-slider-header">
+        <span class="eg-label">${label}</span>
+        <span class="eg-slider-val" id="${id}-val">${val}${unit}</span>
+      </div>
+      <input class="eg-slider" type="range" id="${id}" min="${min}" max="${max}" value="${val}">
+    </div>`;
 
-      // Game just started
-      if (!wasInGame) {
-        wasInGame = true;
-        Opening.build();
-      }
+  this.gui = document.createElement('div');
+  this.gui.id = 'echo-gui';
+  this.gui.innerHTML = `
+    <div id="eg-titlebar">
+      <span id="eg-logo">ECHO</span>
+      <button id="eg-close">âœ•</button>
+    </div>
 
-      Cycle.update();
-      if (!Cycle.tickChanged) { requestAnimationFrame(mainLoop); return; }
+    <div id="eg-tabs">
+      <div class="eg-tab active" data-tab="opening">Opening</div>
+      <div class="eg-tab"        data-tab="visuals">Visuals</div>
+      <div class="eg-tab"        data-tab="micro">Micro</div>
+    </div>
 
-      Phase.update(Cycle.tick);
-      Bot.detectIncoming();
-      if (Settings.defenseEnabled && Bot.underAttack) Bot.prioritizeRetreat();
+    <div id="eg-content">
 
-      // Run engines based on settings
-      if (Settings.autoOpening) Opening.processTick();
-      if (Settings.speedBoostEnabled) SpeedBoost.processTick();
-      if (Settings.defenseEnabled) Defense.processTick();
-      if (Settings.expansionEnabled) Expansion.processTick();
-      if (Settings.combatEnabled) Combat.processTick();
-      if (Settings.boatsEnabled) Boats.processTick();
-      if (Settings.allianceEnabled) Alliance.processTick();
+      <div class="eg-panel active" id="panel-opening">
+        <div class="eg-section">Opening</div>
+        ${toggle('Auto Opening', 'opt-opening-open')}
+      </div>
 
-      GUI.update();
-    } catch (e) {
-      // Silent â€” game error handler would show popup
+      <div class="eg-panel" id="panel-visuals">
+        <div class="eg-section">Players</div>
+        ${toggle('ESP', 'opt-esp')}
+        <div class="eg-section">World</div>
+        ${toggle('Fullbright', 'opt-fullbright')}
+      </div>
+
+      <div class="eg-panel" id="panel-micro">
+        <div class="eg-section">Auto Attack</div>
+        ${toggle('Attack Formula', 'opt-attack-formula')}
+        ${slider('Attack Percent', 'opt-attack-percent', 1, 30, 12, '%')}
+        ${slider('Interval', 'opt-attack-interval', 1, 667, 400, 'ms')}
+        <div class="eg-btn-row" style="margin-top: 14px;">
+          <button class="eg-btn" id="micro-start-btn">Start (Q)</button>
+          <button class="eg-btn" id="micro-stop-btn">Stop (E)</button>
+        </div>
+        <div class="eg-status off" id="micro-status">INACTIVE</div>
+        <div class="eg-section">Legit Attack</div>
+        ${toggle('Legit Mode', 'opt-legitmode')}
+      </div>
+
+    </div>
+  `;
+
+  const bindToggle = (id, fn) => {
+    const el = this.gui.querySelector(`#${id}`);
+    if (el) el.addEventListener('change', () => fn(el.checked));
+  };
+
+  const wireToggles = () => {
+    bindToggle('opt-opening-open', onAutoOpenToggle);
+    bindToggle('opt-esp', onESPToggle);
+    bindToggle('opt-fullbright', onFullbrightToggle);
+    bindToggle('opt-legitmode', onLegitModeToggle);
+
+    bindToggle('opt-attack-formula', (enabled) => {
+      microState.useFormula = enabled;
+      const ps = this.gui.querySelector('#opt-attack-percent');
+      if (ps) ps.disabled = enabled;
+    });
+
+    const pSlider = this.gui.querySelector('#opt-attack-percent');
+    const pVal = this.gui.querySelector('#opt-attack-percent-val');
+    if (pSlider)
+      pSlider.addEventListener('input', () => {
+        microState.attackPercent = parseInt(pSlider.value);
+        if (pVal) pVal.textContent = microState.attackPercent + '%';
+      });
+
+    const iSlider = this.gui.querySelector('#opt-attack-interval');
+    const iVal = this.gui.querySelector('#opt-attack-interval-val');
+    if (iSlider)
+      iSlider.addEventListener('input', () => {
+        microState.intervalMs = parseInt(iSlider.value);
+        if (iVal) iVal.textContent = microState.intervalMs + 'ms';
+        if (microState.attackInterval !== null) {
+          clearInterval(microState.attackInterval);
+          microState.attackInterval = setInterval(
+            startMicro,
+            microState.intervalMs
+          );
+        }
+      });
+
+    const startBtn = this.gui.querySelector('#micro-start-btn');
+    const stopBtn = this.gui.querySelector('#micro-stop-btn');
+    if (startBtn) startBtn.addEventListener('click', startAutoAttack);
+    if (stopBtn) stopBtn.addEventListener('click', stopAutoAttack);
+  };
+
+  const bindTabs = () => {
+    this.gui.querySelectorAll('.eg-tab').forEach((tab) => {
+      tab.addEventListener('click', () => {
+        this.gui
+          .querySelectorAll('.eg-tab')
+          .forEach((t) => t.classList.remove('active'));
+        this.gui
+          .querySelectorAll('.eg-panel')
+          .forEach((p) => p.classList.remove('active'));
+        tab.classList.add('active');
+        const panel = this.gui.querySelector(`#panel-${tab.dataset.tab}`);
+        if (panel) panel.classList.add('active');
+      });
+    });
+  };
+
+  const bindClose = () => {
+    const btn = this.gui.querySelector('#eg-close');
+    if (btn) btn.addEventListener('click', () => this.hide());
+  };
+
+  const bindDrag = () => {
+    const bar = this.gui.querySelector('#eg-titlebar');
+    let ox = 0, oy = 0, dragging = false;
+
+    /* Mouse events (PC) */
+    bar.addEventListener('mousedown', (e) => {
+      if (e.target.id === 'eg-close') return;
+      dragging = true;
+      const r = this.gui.getBoundingClientRect();
+      ox = e.clientX - r.left;
+      oy = e.clientY - r.top;
+      e.preventDefault();
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      e.preventDefault();
+      this.gui.style.left = e.clientX - ox + 'px';
+      this.gui.style.top = e.clientY - oy + 'px';
+      this.gui.style.transform = 'none';
+    });
+
+    document.addEventListener('mouseup', () => {
+      dragging = false;
+    });
+
+    /* Touch events (Mobile) */
+    bar.addEventListener('touchstart', (e) => {
+      if (e.target.id === 'eg-close') return;
+      const t = e.touches[0];
+      const r = this.gui.getBoundingClientRect();
+      ox = t.clientX - r.left;
+      oy = t.clientY - r.top;
+      dragging = true;
+    }, { passive: true });
+
+    bar.addEventListener('touchmove', (e) => {
+      if (!dragging) return;
+      e.preventDefault();
+      const t = e.touches[0];
+      let nx = t.clientX - ox;
+      let ny = t.clientY - oy;
+      /* Clamp to viewport */
+      const gw = this.gui.offsetWidth;
+      const gh = this.gui.offsetHeight;
+      nx = Math.max(0, Math.min(window.innerWidth - gw, nx));
+      ny = Math.max(0, Math.min(window.innerHeight - gh, ny));
+      this.gui.style.left = nx + 'px';
+      this.gui.style.top = ny + 'px';
+      this.gui.style.transform = 'none';
+    }, { passive: false });
+
+    bar.addEventListener('touchend', () => {
+      dragging = false;
+    });
+  };
+
+  /* Prevent touch scroll/zoom inside GUI */
+  const bindTouchGuard = () => {
+    this.gui.addEventListener('touchmove', (e) => {
+      e.preventDefault();
+    }, { passive: false });
+  };
+
+  this.ensureMounted = () => {
+    if (!document.body.contains(this.gui)) {
+      document.body.appendChild(this.gui);
+      wireToggles();
+      bindTabs();
+      bindClose();
+      bindDrag();
+      bindTouchGuard();
+      createMobileToggle();
     }
-    requestAnimationFrame(mainLoop);
-  }
+  };
 
-  /* ================================================================
-   *  INIT
-   * ================================================================ */
+  this.show = () => {
+    this.ensureMounted();
+    this.gui.style.display = 'block';
+  };
+  this.hide = () => {
+    this.gui.style.display = 'none';
+  };
+  this.toggle = () => {
+    this.gui.style.display === 'block' ? this.hide() : this.show();
+  };
+
+  this.setMicroStatus = (active) => {
+    const el = this.gui.querySelector('#micro-status');
+    const sb = this.gui.querySelector('#micro-start-btn');
+    if (!el) return;
+    el.textContent = active ? 'ACTIVE' : 'INACTIVE';
+    el.className = 'eg-status ' + (active ? 'on' : 'off');
+    if (sb) sb.classList.toggle('active', active);
+  };
+}
+
+var echoSettings = new EchoSettings();
+echoSettings.show();
+
+
+/* ================================================================
+ *  KEYBINDS (PC only â€” mobile uses the floating E button)
+ * ================================================================ */
+document.addEventListener('keydown', function (e) {
+  if (
+    e.target.tagName === 'TEXTAREA' ||
+    (e.target.tagName === 'INPUT' && e.target.type === 'text')
+  )
+    return;
+
+  const key = e.key;
+  if (key === 'o' || key === 'O') echoSettings.toggle();
+  if (key === 'q' || key === 'Q') {
+    e.preventDefault();
+    startAutoAttack();
+  }
+  if (key === 'e' || key === 'E') {
+    e.preventDefault();
+    stopAutoAttack();
+  }
+});
+
+
+/* ================================================================
+ *  MICRO STATE
+ * ================================================================ */
+const microState = {
+  attackPercent: 12,
+  intervalMs: 400,
+  useFormula: false,
+  attackInterval: null,
+  isAttacking: false,
+  attackQueue: [],
+  lastAttack: new Map(),
+  activeTargets: new Set(),
+};
+
+const MICRO_MAX_DENSITY = 0.5;
+const MICRO_MAX_ATTACKS_PER_CYCLE = 1;
+const MICRO_DELAY_BETWEEN_ATTACKS_MS = 1;
+const MICRO_MIN_ATTACK_INTERVAL_TARGET = 5000;
+
+const percentToValue = (p) =>
+  Math.max(0, Math.min(1023, Math.floor(1024 * (p / 100) + 0.5) - 1));
+
+
+/* ================================================================
+ *  CORE FUNCTIONS  (hooks for deobfuscated script.js)
+ * ================================================================ */
+
+function getMyPlayerId() {
   try {
-    GUI.create();
-    requestAnimationFrame(mainLoop);
-    console.log('%c[MESSIAH v5] BEYOND MESSIAH â€” Fully automatic', 'color:#f59e0b;font-weight:bold;font-size:14px');
-    console.log('[v5] GUI with 3 tabs: Status / Engine / Config');
-    console.log('[v5] SpeedBoost is automatic â€” no toggle needed');
-    console.log('[v5] Type EchoAPI.debug() to verify hooks');
+    const id = window.gameManager?.OwnPlayerId;
+    return (id != null && id !== -1) ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+function getTicks() {
+  try {
+    return window.gameLoop?.getTick();
+  } catch {
+    return null;
+  }
+}
+
+function getGameStarted() {
+  try {
+    return window.gameManager?.isGameStarted();
+  } catch {
+    return false;
+  }
+}
+
+function attackTarget(unitRatio, targetPlayerId) {
+  try {
+    return window.protocolHandler?.gameCommandSender.attackTargetHandler(
+      unitRatio,
+      targetPlayerId
+    );
   } catch (e) {
-    setTimeout(function () {
-      try { GUI.create(); requestAnimationFrame(mainLoop); } catch (e2) { /* */ }
-    }, 1000);
+    console.error('[ECHO] attackTarget failed:', e);
+    return false;
+  }
+}
+
+function attackTargetSP(ownPlayerId, unitRatio, targetPlayer) {
+  try {
+    return window.protocolHandler?.localCommandProcessor.attackTargetSp(
+      ownPlayerId,
+      unitRatio,
+      targetPlayer
+    );
+  } catch (e) {
+    console.error('[ECHO] attackTargetSP failed:', e);
+    return false;
+  }
+}
+
+/**
+ * Find enemy player IDs that share a border with us.
+ */
+function findBorderingIds(myCells, allBorders, offsets, totalPlayers, myId) {
+  if (!myCells || !allBorders || !offsets) return new Map();
+
+  const cellSet = new Set(myCells);
+  const neighbors = new Map();
+
+  for (let i = 0; i < totalPlayers; i++) {
+    if (i === myId || !allBorders[i]) continue;
+    let shared = 0;
+    const enemyTiles = allBorders[i];
+    for (let t = 0, len = enemyTiles.length; t < len; t++) {
+      const c = enemyTiles[t];
+      for (let d = 0; d < offsets.length; d++) {
+        if (cellSet.has(c - offsets[d])) {
+          shared++;
+          break;
+        }
+      }
+    }
+    if (shared > 0) neighbors.set(i, shared);
+  }
+  return neighbors;
+}
+
+async function processMicroQueue(myTroops) {
+  if (microState.isAttacking || !microState.attackQueue.length) return;
+  microState.isAttacking = true;
+  let sent = 0;
+
+  while (
+    microState.attackQueue.length > 0 &&
+    sent < MICRO_MAX_ATTACKS_PER_CYCLE
+  ) {
+    const enemy = microState.attackQueue.shift();
+    if (!enemy) continue;
+
+    const now = Date.now();
+    const last = microState.lastAttack.get(enemy.id) || 0;
+    if (now - last < MICRO_MIN_ATTACK_INTERVAL_TARGET) continue;
+
+    let percent;
+    if (microState.useFormula) {
+      const needed = (enemy.troops + enemy.land) * 2.35;
+      percent = Math.max(
+        1,
+        Math.min(100, Math.round((needed / Math.max(1, myTroops)) * 100))
+      );
+    } else {
+      percent = microState.attackPercent;
+    }
+
+    attackTarget(percentToValue(percent), enemy.id);
+    microState.lastAttack.set(enemy.id, now);
+    microState.activeTargets.add(enemy.id);
+    sent++;
+
+    if (microState.attackQueue.length && sent < MICRO_MAX_ATTACKS_PER_CYCLE)
+      await new Promise((r) => setTimeout(r, MICRO_DELAY_BETWEEN_ATTACKS_MS));
   }
 
-})();
+  microState.isAttacking = false;
+}
+
+function startMicro() {
+  if (!EchoAPI.check()) {
+    console.warn('[ECHO] Game API not ready yet');
+    return;
+  }
+
+  const playerData = window.playerData;
+  const mapData = window.mapData;
+
+  const troopData = playerData.playerTroops;
+  const landData = playerData.landOwned;
+  const borders = playerData.playerTiles;
+  const offsets = mapData.neighborOffsets;
+  if (!troopData || !landData || !borders || !offsets) return;
+
+  const myId = getMyPlayerId();
+  if (myId == null || !borders[myId]) return;
+
+  const myTroops = troopData[myId] || 1;
+
+  // Clean up dead/eliminated targets
+  for (const id of [...microState.activeTargets]) {
+    if (!landData[id] || landData[id] === 0) {
+      microState.activeTargets.delete(id);
+      microState.lastAttack.delete(id);
+    }
+  }
+
+  // Find bordering enemies
+  const borderNeighbors = findBorderingIds(
+    borders[myId],
+    borders,
+    offsets,
+    window.gameManager.arraySize,
+    myId
+  );
+
+  // Build candidate list (filter by density)
+  const candidates = [];
+  for (const [enemyId, shared] of borderNeighbors) {
+    const troops = troopData[enemyId];
+    const land = landData[enemyId];
+    if (troops == null || troops === 0) continue;
+    if (land > 0 && troops / land > MICRO_MAX_DENSITY) continue;
+    candidates.push({ id: enemyId, troops, land, sharedBorderCount: shared });
+  }
+
+  candidates.sort((a, b) => b.sharedBorderCount - a.sharedBorderCount);
+  microState.attackQueue = candidates.slice();
+
+  if (microState.attackQueue.length && !microState.isAttacking)
+    void processMicroQueue(myTroops);
+}
+
+function startAutoAttack() {
+  if (microState.attackInterval) return;
+  startMicro();
+  microState.attackInterval = setInterval(startMicro, microState.intervalMs);
+  echoSettings.setMicroStatus(true);
+}
+
+function stopAutoAttack() {
+  clearInterval(microState.attackInterval);
+  microState.attackInterval = null;
+  microState.attackQueue = [];
+  microState.isAttacking = false;
+  echoSettings.setMicroStatus(false);
+}
+
+
+/* ================================================================
+ *  FEATURES
+ * ================================================================ */
+const features = { autoOpen: false };
+
+function onAutoOpenToggle(enabled) {
+  features.autoOpen = enabled;
+  console.log('[ECHO] Auto Opening:', enabled ? 'ON' : 'OFF');
+}
+function onESPToggle(enabled) {
+  console.log('[ECHO] ESP:', enabled ? 'ON' : 'OFF');
+}
+function onFullbrightToggle(enabled) {
+  console.log('[ECHO] Fullbright:', enabled ? 'ON' : 'OFF');
+}
+function onLegitModeToggle(enabled) {
+  console.log('[ECHO] Legit Mode:', enabled ? 'ON' : 'OFF');
+}
+
+
+/* ================================================================
+ *  AUTO OPENING
+ * ================================================================ */
+function startAutoOpen(ticks) {
+  const NEUTRAL_ID = window.gameManager?.arraySize || 512;
+
+  switch (ticks) {
+     // Cycle 1: 144L, 799T
+    case 60: attackTarget(percentToValue(20.800), 512); break;
+    case 81: attackTarget(percentToValue(17.871), 512); break;
+
+    // Cycle 2: 544L , 1045T
+    case 151: attackTarget(percentToValue(16.7), 512); break;
+    case 165: attackTarget(percentToValue(18.55), 512); break;
+    case 172: attackTarget(percentToValue(39.84), 512); break;
+    case 186: attackTarget(percentToValue(24.12), 512); break;
+
+    // Cycle 3: 1104L , 1656T
+    case 256: attackTarget(percentToValue(0.1), 512); break;
+    case 263: attackTarget(percentToValue(22.3633), 512); break;
+    case 270: attackTarget(percentToValue(52.54), 512); break;
+    case 284: attackTarget(percentToValue(29.98), 512); break;
+
+    // Cycle 4:2244L , 2484T
+    case 354: attackTarget(percentToValue(0.01), 512); break;
+    case 361: attackTarget(percentToValue(47.07), 512); break;
+    case 375: attackTarget(percentToValue(35.84), 512); break;
+    case 382: attackTarget(percentToValue(87.4), 512); break;
+
+    // Cycle 5:3784L , 4378T
+    case 452: attackTarget(percentToValue(28.61), 512); break;
+    case 466: attackTarget(percentToValue(23.73), 512); break;
+    case 473: attackTarget(percentToValue(31.64), 512); break;
+    case 480: attackTarget(percentToValue(71), 512); break;
+  }
+}
+
+
+/* ================================================================
+ *  MAIN CLIENT LOOP
+ * ================================================================ */
+let lastTick = -1;
+
+function clientLoop() {
+  const ticks = getTicks();
+  const gameStarted = getGameStarted();
+
+  if (!gameStarted) {
+    lastTick = -1;
+    requestAnimationFrame(clientLoop);
+    return;
+  }
+
+  if (ticks == null) {
+    requestAnimationFrame(clientLoop);
+    return;
+  }
+
+  if (features.autoOpen && ticks !== lastTick) {
+    lastTick = ticks;
+    startAutoOpen(ticks);
+  }
+
+  requestAnimationFrame(clientLoop);
+}
+
+requestAnimationFrame(clientLoop);
+
+console.log('%c[ECHO] Client v2 Mobile loaded', 'color: #a855f7; font-weight: bold');
+console.log('[ECHO] Press O to toggle GUI, Q/E to start/stop micro');
+console.log('[ECHO] Mobile: tap the E button to toggle GUI');
+console.log('[ECHO] Type EchoAPI.debug() to verify game hooks');
